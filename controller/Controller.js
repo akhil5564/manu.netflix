@@ -80,7 +80,7 @@ const getAllData = async (req, res) => {
       } else {
         return res.status(400).json({ message: 'Invalid user type' });
       }
-  
+
       // Check if the username already exists
       const existingUser = await (userType === 'main' ? MainUser : SubUser).findOne({
         username
