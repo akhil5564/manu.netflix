@@ -8,13 +8,7 @@ const resultSchema = new mongoose.Schema({
   time: { type: String, required: true }, // Store the time slot
 }, { timestamps: true }); // Optionally, you can use timestamps
 
-// Check if the model is already defined to prevent overwriting
-let Result;
-
-if (mongoose.models.Result) {
-  Result = mongoose.models.Result; // If already defined, use the existing model
-} else {
-  Result = mongoose.model('Result', resultSchema); // If not, define the model
-}
+// Use the `mongoose.models` to check if the model exists
+const Result = mongoose.models.Result || mongoose.model('Result', resultSchema);
 
 module.exports = Result;
