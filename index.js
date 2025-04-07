@@ -4,7 +4,7 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const connectDB = require('./database/model/ConnectToDb'); // Import DB connection function
 const { postAddData, getAllData,postAddResult,deleteContainer,getResult,getCounts,createUser  } = require('./controller/Controller'); // Import controller
-const Result = require('./model/Result');
+const Result = require('./controller/model/Result');
 
 
 // Initialize dotenv for environment variables

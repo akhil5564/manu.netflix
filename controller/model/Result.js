@@ -8,7 +8,7 @@ const resultSchema = new mongoose.Schema({
   time: { type: String, required: true }, // Store the time slot
 }, { timestamps: true }); // Optionally, you can use timestamps
 
-// Use the `mongoose.models` to check if the model exists
+// Safely check if model already exists
 const Result = mongoose.models.Result || mongoose.model('Result', resultSchema);
 
 module.exports = Result;

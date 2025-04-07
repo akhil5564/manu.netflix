@@ -7,8 +7,9 @@ const app = express();
 app.use(express.json());
 
 // Routes to handle adding and fetching data
-app.post('/addData', postAddData);  // To add data entered by the user
-app.get('/getData', getAllData);    // To get all the stored data
+app.post('/addData', authenticateUser, postAddData);
+app.get('/getData', authenticateUser, getAllData);
+
 router.get('/data', getData);
 app.post('/addResult', postAddResult);
 // Correct DELETE route to delete data by ID
