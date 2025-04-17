@@ -19,17 +19,14 @@ const postAddData = async (req, res) => {
     // Create and save new data document(s)
     const counter = await Counter.findOneAndUpdate(
       { name: 'dataCounter' },
-      { $inc: { currentId: 1 } },
       { new: true, upsert: true }
     );
-    const customId = counter.currentId;
 
     // Ensure tableRows is always an array
     const dataEntries = Array.isArray(tableRows) ? tableRows : [tableRows];
 
     // Modify each row to include the new fields (num, count, letter)
     const newDataArray = dataEntries.map(row => ({
-      customId,
       selectedTime,
       username,  // Ensure that the username is attached to the data row
       tableRows: row,
