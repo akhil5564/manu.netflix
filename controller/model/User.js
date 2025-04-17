@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 const dataSchema = new mongoose.Schema({
-  customId: { type: Number, required: true, unique: true },
+  customId: { type: Number, required: true },
   selectedTime: { type: String, required: true },
   username: { type: String, required: true },
   tableRows: [
