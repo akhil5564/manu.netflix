@@ -7,6 +7,8 @@ const app = express();
 app.use(express.json());
 
 // Routes to handle adding and fetching data
+
+app.post('/loginUser', loginUser);
 app.post('/addData', authenticateUser, postAddData);
 app.get('/getData', authenticateUser, getAllData);
 

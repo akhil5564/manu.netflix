@@ -1,4 +1,4 @@
-const DataModel = require('./model/User'); // MongoDB model for data
+const {DataModel,AdminModel }= require('./model/User'); // MongoDB model for data
 const MainUser = require('./model/MainUser'); // MongoDB model for data
 const SubUser = require('./model/SubUser'); // MongoDB model for data
 const Counter = require('./model/CounterModel'); // MongoDB model for counter
@@ -7,56 +7,90 @@ const Result = require('./model/Result');
 
 
 // Controller function to handle saving data under a specific username
-const postAddData = async (req, res) => {
-  try {
-    const { selectedTime, tableRows, username, overwrite = false } = req.body;
+  // const postAddData = async (req, res) => {
+  //   try {
+  //     const { selectedTime, tableRows, username, overwrite = false } = req.body;
 
-    // Validate input data
-    if (!username || username.trim() === "") {
-      return res.status(400).json({ message: 'Username is required and cannot be empty' });
+  //     // Validate input data
+  //     if (!username || username.trim() === "") {
+  //       return res.status(400).json({ message: 'Username is required and cannot be empty' });
+  //     }
+  //     const customId = `${username}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+  //     // Create and save new data document(s)
+  //     const counter = await Counter.findOneAndUpdate(
+  //       { name: 'dataCounter' },
+  //       { new: true, upsert: true }
+  //     );
+
+  //     // Ensure tableRows is always an array
+  //     const dataEntries = Array.isArray(tableRows) ? tableRows : [tableRows];
+
+  //     // Modify each row to include the new fields (num, count, letter)
+  //     const newDataArray = dataEntries.map(row => ({
+  //       selectedTime,
+  //       username,  // Ensure that the username is attached to the data row
+  //       tableRows: row,
+  //       num: row.num || 0, // Add num field (if not present, default to 0)
+  //       count: row.count || 0, // Add count field (if not present, default to 0)
+  //       letter: row.letter || '', // Add letter field (if not present, default to empty string)
+  //       createdAt: new Date(), 
+  //       customId: `${username}-${Date.now()}-${Math.floor(Math.random() * 1000)}` 
+  //     }));
+
+  //     // Save the entries
+  //     await DataModel.insertMany(newDataArray);  // Save all the entries at once
+
+  //     // Optionally, if you want to update the logged-in user's specific record or track these rows separately for the user:
+  //     await DataModel.updateOne(
+  //       { username },
+  //       { $push: { addedData: newDataArray.map(entry => entry._id) } }  // Assuming `addedData` is an array field in the user document that tracks their data entries
+  //     );
+
+  //     // Respond with success and return the new document IDs
+  //     res.status(200).json({
+  //       message: 'Data saved successfully',
+  //       customId,
+  //       _id: newDataArray.map(entry => entry._id),  // Return all the new document IDs
+  //     });
+  //   } catch (error) {
+  //     console.error('Error saving data:', error);
+  //     res.status(500).json({ message: 'Error saving data', error: error.message });
+  //   }
+  // };
+  const postAddData = async (req, res) => {
+    try {
+      const { selectedTime, tableRows, username } = req.body;
+  
+      if (!username || username.trim() === "") {
+        return res.status(400).json({ message: 'Username is required and cannot be empty' });
+      }
+  
+      const customId = `${username}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  
+      // Create a single document with all table rows
+      const newDoc = new DataModel({
+        selectedTime,
+        username,
+        tableRows,  // Already an array
+        customId,
+        createdAt: new Date(),
+      });
+  
+      await newDoc.save();
+  
+      res.status(200).json({
+        message: 'Data saved successfully',
+        _id: newDoc._id,
+        customId: newDoc.customId,
+      });
+  
+    } catch (error) {
+      console.error('Error saving data:', error);
+      res.status(500).json({ message: 'Error saving data', error: error.message });
     }
-
-    // Create and save new data document(s)
-    const counter = await Counter.findOneAndUpdate(
-      { name: 'dataCounter' },
-      { new: true, upsert: true }
-    );
-
-    // Ensure tableRows is always an array
-    const dataEntries = Array.isArray(tableRows) ? tableRows : [tableRows];
-
-    // Modify each row to include the new fields (num, count, letter)
-    const newDataArray = dataEntries.map(row => ({
-      selectedTime,
-      username,  // Ensure that the username is attached to the data row
-      tableRows: row,
-      num: row.num || 0, // Add num field (if not present, default to 0)
-      count: row.count || 0, // Add count field (if not present, default to 0)
-      letter: row.letter || '', // Add letter field (if not present, default to empty string)
-      createdAt: new Date(), // Automatically set the createdAt field
-    }));
-
-    // Save the entries
-    await DataModel.insertMany(newDataArray);  // Save all the entries at once
-
-    // Optionally, if you want to update the logged-in user's specific record or track these rows separately for the user:
-    await DataModel.updateOne(
-      { username },
-      { $push: { addedData: newDataArray.map(entry => entry._id) } }  // Assuming `addedData` is an array field in the user document that tracks their data entries
-    );
-
-    // Respond with success and return the new document IDs
-    res.status(200).json({
-      message: 'Data saved successfully',
-      customId,
-      _id: newDataArray.map(entry => entry._id),  // Return all the new document IDs
-    });
-  } catch (error) {
-    console.error('Error saving data:', error);
-    res.status(500).json({ message: 'Error saving data', error: error.message });
-  }
-};
-
+  };
+  
 
 
 
@@ -262,6 +296,47 @@ const postAddResult = async (req, res) => {
   }
 };
 
+const loginUser = async (req, res) => {
+  try {
+    const { username, password, userType } = req.body;
+
+    // Basic validation
+    if (!username || !password || !userType) {
+      return res.status(400).json({ message: 'Username, password, and userType are required' });
+    }
+
+    // Choose the correct model based on userType
+
+
+    // Find user by username
+    const user = await AdminModel.findOne({ username });
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Compare passwords
+    // const isPasswordMatch = await bcrypt.compare(password, user.password);
+    const isPasswordMatch = password === user.password;
+    if (!isPasswordMatch) {
+      return res.status(401).json({ message: 'Invalid password' });
+    }
+
+    // If everything checks out, respond with success
+    res.status(200).json({
+      message: 'Login successful',
+      user: {
+        id: user._id,
+        name: user.name,
+        username: user.username,
+        userType,
+      },
+    });
+
+  } catch (error) {
+    console.error('Error logging in:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
 
 
 

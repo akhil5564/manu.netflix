@@ -12,6 +12,7 @@ const dataSchema = new mongoose.Schema({
     },
   ],
   createdAt: { type: Date, default: Date.now },
+  customId: { type: String, required: true, unique: true }
 });
 
 // Add an index on `username` for fast querying
@@ -19,4 +20,27 @@ dataSchema.index({ username: 1 });
 
 const DataModel = mongoose.model('Data', dataSchema);
 
-module.exports = DataModel;
+const AdminSchema = new mongoose.Schema(
+  {
+    name: {
+      type: String,
+      required: true,
+    },
+    username: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+    },
+    password: {
+      type: String,
+      required: true,
+    },
+  },
+  {
+    timestamps: true, // Adds createdAt and updatedAt fields
+  }
+);
+const AdminModel = mongoose.model('admin', AdminSchema);
+
+module.exports = {DataModel,AdminModel};
