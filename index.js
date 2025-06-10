@@ -3,7 +3,7 @@ const dotenv = require('dotenv');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const connectDB = require('./database/model/ConnectToDb'); // Import DB connection function
-const { postAddData, getAllData,postAddResult,deleteContainer,getResult,getCounts,createUser  } = require('./controller/Controller'); // Import controller
+const { postAddData, getAllData,postAddResult,deleteContainer,getResult,getCounts,createUser, loginUser  } = require('./controller/Controller'); // Import controller
 const Result = require('./controller/model/Result');
 
 
@@ -29,6 +29,7 @@ app.delete('/deleteData/:id', deleteContainer);
 app.get('/getresult',getResult );  
 app.get('/getCounts',getCounts );    // To get all the stored data
 app.post('/newuser',createUser );
+app.post('/login',loginUser );
 
 
 // Start server

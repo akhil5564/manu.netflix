@@ -1,5 +1,6 @@
 const express = require('express');
 const { postAddData, getAllData,getData,postAddResult,deleteContainer,getResult,createUser } = require('./controller/Controller');
+const { loginUser } = require('../controller/Controller');
 
 const app = express();
 

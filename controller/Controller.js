@@ -1,4 +1,4 @@
-const {DataModel,AdminModel }= require('./model/User'); // MongoDB model for data
+const {DataModel,AdminModel, MainUsersModel }= require('./model/User'); // MongoDB model for data
 const MainUser = require('./model/MainUser'); // MongoDB model for data
 const SubUser = require('./model/SubUser'); // MongoDB model for data
 const Counter = require('./model/CounterModel'); // MongoDB model for counter
@@ -299,17 +299,16 @@ const postAddResult = async (req, res) => {
 const loginUser = async (req, res) => {
   try {
     const { username, password, userType } = req.body;
-
     // Basic validation
-    if (!username || !password || !userType) {
-      return res.status(400).json({ message: 'Username, password, and userType are required' });
+    if (!username || !password ) {
+      return res.status(400).json({ message: 'Username, password are required' });
     }
 
     // Choose the correct model based on userType
 
 
     // Find user by username
-    const user = await AdminModel.findOne({ username });
+    const user = await MainUsersModel.findOne({ username });
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -330,6 +329,7 @@ const loginUser = async (req, res) => {
         username: user.username,
         userType,
       },
+      status:1
     });
 
   } catch (error) {
@@ -340,5 +340,5 @@ const loginUser = async (req, res) => {
 
 
 
-module.exports = { postAddData, getAllData,postAddResult,deleteContainer,getResult,getCounts,createUser 
+module.exports = { postAddData, getAllData,postAddResult,deleteContainer,getResult,getCounts,createUser,loginUser
 };
