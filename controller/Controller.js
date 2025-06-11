@@ -298,7 +298,7 @@ const postAddResult = async (req, res) => {
 
 const loginUser = async (req, res) => {
   try {
-    const { username, password, userType } = req.body;
+    const { username, password } = req.body;
     // Basic validation
     if (!username || !password ) {
       return res.status(400).json({ message: 'Username, password are required' });
@@ -309,6 +309,8 @@ const loginUser = async (req, res) => {
 
     // Find user by username
     const user = await MainUsersModel.findOne({ username });
+    console.log("user===========",user);
+    
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -327,7 +329,6 @@ const loginUser = async (req, res) => {
         id: user._id,
         name: user.name,
         username: user.username,
-        userType,
       },
       status:1
     });
