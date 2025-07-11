@@ -1,345 +1,118 @@
-const {DataModel,AdminModel, MainUsersModel }= require('./model/User'); // MongoDB model for data
-const MainUser = require('./model/MainUser'); // MongoDB model for data
-const SubUser = require('./model/SubUser'); // MongoDB model for data
-const Counter = require('./model/CounterModel'); // MongoDB model for counter
-const bcrypt = require('bcryptjs');
+const MainUser = require('./model/MainUser');
 const Result = require('./model/Result');
+const Entry = require('./model/Entry');
+const bcrypt = require('bcryptjs');
 
-
-// Controller function to handle saving data under a specific username
-  // const postAddData = async (req, res) => {
-  //   try {
-  //     const { selectedTime, tableRows, username, overwrite = false } = req.body;
-
-  //     // Validate input data
-  //     if (!username || username.trim() === "") {
-  //       return res.status(400).json({ message: 'Username is required and cannot be empty' });
-  //     }
-  //     const customId = `${username}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-
-  //     // Create and save new data document(s)
-  //     const counter = await Counter.findOneAndUpdate(
-  //       { name: 'dataCounter' },
-  //       { new: true, upsert: true }
-  //     );
-
-  //     // Ensure tableRows is always an array
-  //     const dataEntries = Array.isArray(tableRows) ? tableRows : [tableRows];
-
-  //     // Modify each row to include the new fields (num, count, letter)
-  //     const newDataArray = dataEntries.map(row => ({
-  //       selectedTime,
-  //       username,  // Ensure that the username is attached to the data row
-  //       tableRows: row,
-  //       num: row.num || 0, // Add num field (if not present, default to 0)
-  //       count: row.count || 0, // Add count field (if not present, default to 0)
-  //       letter: row.letter || '', // Add letter field (if not present, default to empty string)
-  //       createdAt: new Date(), 
-  //       customId: `${username}-${Date.now()}-${Math.floor(Math.random() * 1000)}` 
-  //     }));
-
-  //     // Save the entries
-  //     await DataModel.insertMany(newDataArray);  // Save all the entries at once
-
-  //     // Optionally, if you want to update the logged-in user's specific record or track these rows separately for the user:
-  //     await DataModel.updateOne(
-  //       { username },
-  //       { $push: { addedData: newDataArray.map(entry => entry._id) } }  // Assuming `addedData` is an array field in the user document that tracks their data entries
-  //     );
-
-  //     // Respond with success and return the new document IDs
-  //     res.status(200).json({
-  //       message: 'Data saved successfully',
-  //       customId,
-  //       _id: newDataArray.map(entry => entry._id),  // Return all the new document IDs
-  //     });
-  //   } catch (error) {
-  //     console.error('Error saving data:', error);
-  //     res.status(500).json({ message: 'Error saving data', error: error.message });
-  //   }
-  // };
-  const postAddData = async (req, res) => {
-    try {
-      const { selectedTime, tableRows, username } = req.body;
-  
-      if (!username || username.trim() === "") {
-        return res.status(400).json({ message: 'Username is required and cannot be empty' });
-      }
-  
-      const customId = `${username}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-  
-      // Create a single document with all table rows
-      const newDoc = new DataModel({
-        selectedTime,
-        username,
-        tableRows,  // Already an array
-        customId,
-        createdAt: new Date(),
-      });
-  
-      await newDoc.save();
-  
-      res.status(200).json({
-        message: 'Data saved successfully',
-        _id: newDoc._id,
-        customId: newDoc.customId,
-      });
-  
-    } catch (error) {
-      console.error('Error saving data:', error);
-      res.status(500).json({ message: 'Error saving data', error: error.message });
-    }
-  };
-  
-
-
-
-
-
-
-
-  
-
-// Controller function to fetch all stored data
-// Controller.js
-const getAllData = async (req, res) => {
-    try {
-      // Fetch all documents from the DataModel
-      const data = await DataModel.find(); // This returns all data
-      res.status(200).json(data); // Send the data as JSON
-    } catch (error) {
-      console.error('Error fetching data:', error);
-      res.status(500).json({ message: 'Error fetching data', error: error.message });
-    }
-  };
-  
-
-  
-  const createUser = async (req, res) => {
-    try {
-      const { name, username, password, userType } = req.body;
-  
-      // Validate input
-      if (!name || !username || !password || !userType) {
-        return res.status(400).json({ message: 'Name, username, password, and userType are required' });
-      }
-  
-      // Username validation (check length and alphanumeric characters)
-      const usernameRegex = /^[a-zA-Z0-9_]+$/;
-      if (!usernameRegex.test(username)) {
-        return res.status(400).json({ message: 'Username must contain only letters, numbers, and underscores' });
-      }
-  
-      const hashedPassword = await bcrypt.hash(password, 10); // Hash password
-  
-      let newUser;
-      if (userType === 'main') {
-        newUser = new MainUser({ name, username, password: hashedPassword });
-      } else if (userType === 'sub') {
-        newUser = new SubUser({ name, username, password: hashedPassword });
-      } else {
-        return res.status(400).json({ message: 'Invalid user type' });
-      }
-  
-      // Check if the username already exists
-      const existingUser = await (userType === 'main' ? MainUser : SubUser).findOne({
-        username
-      });
-  
-      if (existingUser) {
-        return res.status(400).json({ message: 'Username already exists' });
-      }
-  
-      await newUser.save();
-      res.status(201).json({ message: 'User created successfully', user: newUser });
-    } catch (error) {
-      console.error('Error creating user:', error);
-      res.status(500).json({ message: 'Error creating user', error: error.message });
-    }
-  };
-  
-  
-
-
-  // Controller function to fetch data based on result, date, and time
-  const getResult = async (req, res) => {
-    try {
-      const { result, date, time } = req.query; // Extract query parameters for result, date, and time
-  
-      // Build the query object dynamically based on the query params
-      let query = {};
-  
-      // If a result is provided, add it to the query filter
-      if (result) {
-        query.result = result;
-      }
-  
-      // If a date is provided, filter by the specific date
-      if (date) {
-        query.date = date;
-      }
-  
-      // If a time is provided, filter by the specific time
-      if (time) {
-        query.time = time;
-      }
-  
-      // Fetch the latest result, sorted by the `date` field in descending order
-      const data = await Result.find(query).sort({ date: -1 }).limit(1); // Limit to 1 to get the latest entry
-  
-      // If no data is found, return a 404 response
-      if (data.length === 0) {
-        return res.status(404).json({ message: 'No results found' });
-      }
-  
-      // Return the data as JSON
-      res.status(200).json(data);
-    } catch (error) {
-      console.error('Error fetching data:', error);
-      res.status(500).json({ message: 'Error fetching data', error: error.message });
-    }
-  };
-  
-const getCounts = async (req, res) => {
+// ✅ Create New User
+const createUser = async (req, res) => {
   try {
-    // Fetch all documents from the DataModel or Result model
-    const data = await DataModel.find(); // or Result.find() depending on where you want to fetch the data from
+    const {
+      name = '',
+      username,
+      password,
+      scheme = '',
+      createdBy = '',
+      usertype = 'sub',
+    } = req.body;
 
-    // Filter the data based on the 'count' value greater than 5
-    const filteredData = data.filter(row => parseInt(row.count, 10) > 5);
-    
-    // Send the filtered data back as JSON
-    res.json(filteredData);
-  } catch (error) {
-    console.error('Error fetching counts:', error);
-    res.status(500).json({ message: 'Internal Server Error' });
-  }
-};
-
-// Controller function for deleting data
-const deleteContainer = async (req, res) => {
-  const { id } = req.params;  // Access the id from the URL parameter
-
-  try {
-    // Attempt to delete data from the database by its ID
-    const deletedData = await DataModel.findByIdAndDelete(id);
-
-    if (!deletedData) {
-      return res.status(404).json({ message: 'Data not found' });
+    if (!username || !password) {
+      return res.status(400).json({ message: 'Username and password are required' });
     }
 
-    // Send a success response back to the frontend
-    res.status(200).json({ message: 'Data deleted successfully' });
-  } catch (error) {
-    console.error('Error deleting data:', error);
-    res.status(500).json({ message: 'Error deleting data', error: error.message });
-  }
-};
-
-const postAddResult = async (req, res) => {
-  try {
-    const { results } = req.body;
-
-    // Validate that `results` is an object with dates as keys
-    if (!results || typeof results !== 'object') {
-      return res.status(400).json({ message: 'Results must be an object with dates as keys.' });
+    const existingUser = await MainUser.findOne({ username });
+    if (existingUser) {
+      return res.status(409).json({ message: 'Username already exists' });
     }
 
-    // Validate that each date contains valid time slots
-    const invalidDates = Object.keys(results).filter(
-      (date) => !results[date] || !Array.isArray(results[date])
-    );
-    if (invalidDates.length > 0) {
-      return res.status(400).json({ message: `Invalid or missing time slots for dates: ${invalidDates.join(', ')}` });
-    }
+    const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Validate individual result objects
-    const invalidResults = [];
-    Object.keys(results).forEach((date) => {
-      results[date].forEach((timeSlotObj) => {
-        Object.keys(timeSlotObj).forEach((timeSlot) => {
-          timeSlotObj[timeSlot].forEach(({ ticket, result }) => {
-            if (!ticket || !result || !/^[0-9]{3}$/.test(result)) {
-              invalidResults.push({ ticket, result, date, time: timeSlot });
-            }
-          });
-        });
-      });
+    const newUser = new MainUser({
+      name,
+      username,
+      password: hashedPassword,
+      scheme,
+      createdBy,
+      usertype,
     });
 
-    if (invalidResults.length > 0) {
-      return res.status(400).json({ message: 'Invalid data in results array', invalidResults });
-    }
+    await newUser.save();
 
-    // Save valid results
-    const resultsToSave = [];
-    Object.keys(results).forEach((date) => {
-      results[date].forEach((timeSlotObj) => {
-        Object.keys(timeSlotObj).forEach((timeSlot) => {
-          timeSlotObj[timeSlot].forEach(({ ticket, result }) => {
-            resultsToSave.push({ ticket, result, date, time: timeSlot });
-          });
-        });
-      });
-    });
-
-    // Log the results before saving
-    console.log('Saving results:', resultsToSave);
-
-    // Proceed with saving the results (ensure the Result model is properly set up)
-    await Result.insertMany(resultsToSave); // Save all results into the database
-
-    res.status(200).json({ message: 'Results saved successfully', results: resultsToSave });
-  } catch (error) {
-    console.error('Error saving data:', error);
-    res.status(500).json({ message: 'Internal server error' });
-  }
-};
-
-const loginUser = async (req, res) => {
-  try {
-    const { username, password } = req.body;
-    // Basic validation
-    if (!username || !password ) {
-      return res.status(400).json({ message: 'Username, password are required' });
-    }
-
-    // Choose the correct model based on userType
-
-
-    // Find user by username
-    const user = await MainUsersModel.findOne({ username });
-    console.log("user===========",user);
-    
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    // Compare passwords
-    // const isPasswordMatch = await bcrypt.compare(password, user.password);
-    const isPasswordMatch = password === user.password;
-    if (!isPasswordMatch) {
-      return res.status(401).json({ message: 'Invalid password' });
-    }
-
-    // If everything checks out, respond with success
-    res.status(200).json({
-      message: 'Login successful',
+    res.status(201).json({
+      message: 'User created successfully',
       user: {
-        id: user._id,
-        name: user.name,
-        username: user.username,
+        id: newUser._id,
+        name: newUser.name,
+        username: newUser.username,
+        scheme: newUser.scheme,
+        createdBy: newUser.createdBy,
+        usertype: newUser.usertype,
       },
-      status:1
     });
-
   } catch (error) {
-    console.error('Error logging in:', error);
+    console.error('[CREATE USER ERROR]', error);
     res.status(500).json({ message: 'Internal server error' });
   }
 };
 
+// ✅ Add Entries
+const addEntries = async (req, res) => {
+  try {
+    const { entries, timeLabel, timeCode, createdBy } = req.body;
 
+    if (!entries || entries.length === 0) {
+      return res.status(400).json({ message: 'No entries provided' });
+    }
 
-module.exports = { postAddData, getAllData,postAddResult,deleteContainer,getResult,getCounts,createUser,loginUser
+    const toSave = entries.map(e => ({
+      ...e,
+      timeLabel,
+      timeCode,
+      createdBy,
+    }));
+
+    await Entry.insertMany(toSave);
+
+    res.status(200).json({ message: 'Entries saved successfully' });
+  } catch (error) {
+    console.error('[SAVE ENTRY ERROR]', error);
+    res.status(500).json({ message: 'Server error saving entries' });
+  }
+};
+
+// ✅ Get Result (by date and time)
+const getresult = async (req, res) => {
+  try {
+    const { date, time } = req.query;
+
+    if (!date || !time) {
+      return res.status(400).json({ message: 'Date and time are required' });
+    }
+
+    const results = await Result.find({ date, time });
+    res.status(200).json({ results });
+  } catch (error) {
+    console.error('[GET RESULT ERROR]', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// ✅ Get All Users (optionally filter by createdBy)
+const getAllUsers = async (req, res) => {
+  try {
+    const { createdBy } = req.query;
+    const query = createdBy ? { createdBy } : {};
+
+    const users = await MainUser.find(query).select('-password');
+    res.status(200).json(users);
+  } catch (error) {
+    console.error('[GET USERS ERROR]', error);
+    res.status(500).json({ message: 'Failed to fetch users' });
+  }
+};
+
+module.exports = {
+  createUser,
+  addEntries,
+  getresult,
+  getAllUsers,
 };

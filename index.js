@@ -1,38 +1,18 @@
 const express = require('express');
 const dotenv = require('dotenv');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-const connectDB = require('./database/model/ConnectToDb'); // Import DB connection function
-const { postAddData, getAllData,postAddResult,deleteContainer,getResult,getCounts,createUser, loginUser  } = require('./controller/Controller'); // Import controller
-const Result = require('./controller/model/Result');
-
-
-// Initialize dotenv for environment variables
-dotenv.config();
-
+const connectDB = require('./database/model/ConnectToDb');
+const { createUser,getresult,addEntries,getAllUsers} = require('./controller/Controller');
 const app = express();
-const port = process.env.PORT || 5000;
 
-// Middleware
-app.use(cors()); // Allow cross-origin requests from frontend
-app.use(bodyParser.json()); // Parse incoming JSON requests
-
-// Connect to MongoDB
+dotenv.config();
 connectDB();
-
-// Routes to handle adding and fetching data
-app.post('/addData', postAddData);  // To add data entered by the user
-app.get('/getData', getAllData);    // To get all the stored data
-app.post('/addResult', postAddResult);
-// Correct DELETE route to delete data by ID
-app.delete('/deleteData/:id', deleteContainer);
-app.get('/getresult',getResult );  
-app.get('/getCounts',getCounts );    // To get all the stored data
-app.post('/newuser',createUser );
-app.post('/login',loginUser );
+app.use(express.json());
 
 
-// Start server
+app.get('/users', getAllUsers); // 👈 this is the GET route
+app.post('/newuser', createUser); // Direct route
+app.post('/addEntries', addEntries);
+const port = process.env.PORT || 5000;
 app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
+  console.log(`Server running on port ${port}`);
 });
