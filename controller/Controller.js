@@ -12,9 +12,10 @@ const createUser = async (req, res) => {
       password,
       scheme = '',
       createdBy = '',
-      usertype = 'sub',
+      usertype = 'sub', // default to 'sub' if not provided
     } = req.body;
 
+    // Only require username and password
     if (!username || !password) {
       return res.status(400).json({ message: 'Username and password are required' });
     }
@@ -32,7 +33,7 @@ const createUser = async (req, res) => {
       password: hashedPassword,
       scheme,
       createdBy,
-      usertype,
+      usertype, // ✅ added usertype to the document
     });
 
     await newUser.save();
@@ -45,7 +46,7 @@ const createUser = async (req, res) => {
         username: newUser.username,
         scheme: newUser.scheme,
         createdBy: newUser.createdBy,
-        usertype: newUser.usertype,
+        usertype: newUser.usertype, // ✅ include in response
       },
     });
   } catch (error) {
@@ -53,6 +54,7 @@ const createUser = async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 };
+
 
 // ✅ Add Entries
 const addEntries = async (req, res) => {
