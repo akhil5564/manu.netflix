@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { createUser,getresult,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getEntries,  loginUser,
+const { createUser,getresult,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getEntries,  loginUser,  getNextBill, // ✅ Add this
+
  } = require('../controller/Controller');
 
 router.post('/newuser', createUser);
@@ -12,6 +13,7 @@ router.post('/addResult', saveResult);
 router.get('/getResult', getResult);
 router.get('/entries',getEntries); // 👈 Add this
 router.post('/login', loginUser);
+router.get('/next-bill', getNextBill); // ✅ Add this
 
 
 module.exports = router;

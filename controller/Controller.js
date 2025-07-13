@@ -5,36 +5,52 @@ const RateMaster = require('./model/RateMaster');
 const Result = require('./model/ResultModel');
 
 const TicketLimit = require('./model/TicketLimit'); // create this model
+const BillCounter = require('./model/BillCounter');
 
 
+const getNextBill = async () => {
+  const counter = await BillCounter.findOneAndUpdate(
+    { name: 'bill' },
+    { $inc: { counter: 1 } },
+    { new: true, upsert: true }
+  );
+
+  // Format to 4-digit (e.g., 0001, 0023)
+  return counter.counter.toString().padStart(4, '0');
+};
 
 const loginUser = async (req, res) => {
   const { username, password } = req.body;
 
   try {
+    // Find user by username
     const user = await MainUser.findOne({ username });
 
     if (!user) {
       return res.status(404).json({ message: 'Invalid username' });
     }
 
+    // Compare the provided password with the hashed password
     const isMatch = await bcrypt.compare(password, user.password);
 
     if (!isMatch) {
       return res.status(401).json({ message: 'Invalid password' });
     }
 
+    // ✅ If both username and password match, return user info
     res.status(200).json({
       username: user.username,
       usertype: user.usertype,
       name: user.name,
       createdBy: user.createdBy,
     });
+
   } catch (err) {
     console.error('[LOGIN ERROR]', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
+
 
 // ✅ Get Entries (filterable)
 const getEntries = async (req, res) => {
@@ -264,7 +280,9 @@ module.exports = {
     getResult,
       loginUser,
 
-      getEntries, // 👈 New export
+      getEntries, 
+        getNextBill, // ✅ Add this
+
 
 
 };
