@@ -1,7 +1,119 @@
 const MainUser = require('./model/MainUser');
-const Result = require('./model/Result');
 const Entry = require('./model/Entry');
 const bcrypt = require('bcryptjs');
+const RateMaster = require('./model/RateMaster');
+const Result = require('./model/ResultModel');
+
+const TicketLimit = require('./model/TicketLimit'); // create this model
+
+
+
+const loginUser = async (req, res) => {
+  const { username, password } = req.body;
+
+  try {
+    const user = await MainUser.findOne({ username });
+
+    if (!user) {
+      return res.status(404).json({ message: 'Invalid username' });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password);
+
+    if (!isMatch) {
+      return res.status(401).json({ message: 'Invalid password' });
+    }
+
+    res.status(200).json({
+      username: user.username,
+      usertype: user.usertype,
+      name: user.name,
+      createdBy: user.createdBy,
+    });
+  } catch (err) {
+    console.error('[LOGIN ERROR]', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ✅ Get Entries (filterable)
+const getEntries = async (req, res) => {
+  try {
+    const { createdBy, timeCode, date } = req.query;
+
+    const query = {};
+    if (createdBy) query.createdBy = createdBy;
+    if (timeCode) query.timeCode = timeCode;
+    if (date) query.date = date;
+
+    const entries = await Entry.find(query).sort({ createdAt: -1 }); // Optional sorting
+    res.status(200).json(entries);
+  } catch (error) {
+    console.error('[GET ENTRIES ERROR]', error);
+    res.status(500).json({ message: 'Failed to fetch entries' });
+  }
+};
+
+
+
+
+const saveTicketLimit = async (req, res) => {
+  try {
+    const { group1, group2, group3, createdBy } = req.body;
+
+    if (!group1 || !group2 || !group3 || !createdBy) {
+      return res.status(400).json({ message: 'Missing data' });
+    }
+
+    const saved = new TicketLimit({
+      group1,
+      group2,
+      group3,
+      createdBy,
+      date: new Date().toLocaleDateString('en-GB'), // Optional
+    });
+
+    await saved.save();
+
+    res.status(201).json({ message: 'Ticket limit saved successfully' });
+  } catch (err) {
+    console.error('[SAVE TICKET LIMIT]', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+
+// ✅ GET: Get result for specific date and time
+const getResult = async (req, res) => {
+  const { date, time } = req.query;
+
+  try {
+    const result = await Result.findOne({ date, time });
+
+    if (!result) {
+      return res.status(404).json({ message: 'No result found' });
+    }
+
+    const response = {
+      results: {
+        [date]: [
+          {
+            [time]: {
+              prizes: result.prizes,
+              entries: result.entries,
+            },
+          },
+        ],
+      },
+    };
+
+    res.json(response);
+  } catch (error) {
+    console.error('Fetch Error:', error);
+    res.status(500).json({ message: 'Failed to get result' });
+  }
+};
+
 
 // ✅ Create New User
 const createUser = async (req, res) => {
@@ -56,6 +168,32 @@ const createUser = async (req, res) => {
 };
 
 
+const saveResult = async (req, res) => {
+  try {
+    const { results } = req.body;
+
+    const [date] = Object.keys(results);
+    const [timeData] = results[date];
+    const [time] = Object.keys(timeData);
+
+    const { prizes, entries } = timeData[time];
+
+    const newResult = new Result({
+      date,
+      time,
+      prizes,
+      entries,
+    });
+
+    await newResult.save();
+    res.status(200).json({ message: 'Result saved successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error saving result', error: err.message });
+  }
+};
+
+
 // ✅ Add Entries
 const addEntries = async (req, res) => {
   try {
@@ -82,19 +220,23 @@ const addEntries = async (req, res) => {
 };
 
 // ✅ Get Result (by date and time)
-const getresult = async (req, res) => {
-  try {
-    const { date, time } = req.query;
 
-    if (!date || !time) {
-      return res.status(400).json({ message: 'Date and time are required' });
+
+const saveRateMaster = async (req, res) => {
+  try {
+    const { user, draw, rates } = req.body;
+
+    if (!user || !draw || !Array.isArray(rates)) {
+      return res.status(400).json({ message: 'Missing user, draw, or rates' });
     }
 
-    const results = await Result.find({ date, time });
-    res.status(200).json({ results });
+    const newRate = new RateMaster({ user, draw, rates });
+    await newRate.save();
+
+    res.status(201).json({ message: 'Rate master saved successfully', data: newRate });
   } catch (error) {
-    console.error('[GET RESULT ERROR]', error);
-    res.status(500).json({ message: 'Internal server error' });
+    console.error('[SAVE RATE MASTER ERROR]', error);
+    res.status(500).json({ message: 'Server error saving rate master' });
   }
 };
 
@@ -115,6 +257,14 @@ const getAllUsers = async (req, res) => {
 module.exports = {
   createUser,
   addEntries,
-  getresult,
   getAllUsers,
+  saveTicketLimit,
+  saveRateMaster,
+  saveResult,
+    getResult,
+      loginUser,
+
+      getEntries, // 👈 New export
+
+
 };
