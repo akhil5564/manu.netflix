@@ -1,7 +1,7 @@
 const express = require('express');
 const dotenv = require('dotenv');
 const connectDB = require('./database/model/ConnectToDb');
-const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getResult,getEntries, loginUser,  getNextBill, // ✅ Add this
+const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getResult, loginUser,  getNextBill,getEntries // ✅ Add this
 
 } = require('./controller/Controller');
 const app = express();

@@ -7,7 +7,6 @@ const Result = require('./model/ResultModel');
 const TicketLimit = require('./model/TicketLimit'); // create this model
 const BillCounter = require('./model/BillCounter');
 
-
 const getNextBill = async () => {
   const counter = await BillCounter.findOneAndUpdate(
     { name: 'bill' },
@@ -15,7 +14,7 @@ const getNextBill = async () => {
     { new: true, upsert: true }
   );
 
-  // Format to 4-digit (e.g., 0001, 0023)
+  // Format to 4-digit (e.g., 0001, 0023);
   return counter.counter.toString().padStart(4, '0');
 };
 
@@ -53,24 +52,28 @@ const loginUser = async (req, res) => {
 
 
 // ✅ Get Entries (filterable)
+
+
+
 const getEntries = async (req, res) => {
   try {
-    const { createdBy, timeCode, date } = req.query;
+    const { createdBy, timeCode, timeLabel, number, count, date } = req.query;
 
     const query = {};
     if (createdBy) query.createdBy = createdBy;
     if (timeCode) query.timeCode = timeCode;
+    if (timeLabel) query.timeLabel = timeLabel;
+    if (number) query['entries.number'] = number;
+    if (count) query['entries.count'] = parseInt(count);
     if (date) query.date = date;
 
-    const entries = await Entry.find(query).sort({ createdAt: -1 }); // Optional sorting
+    const entries = await Entry.find(query).sort({ createdAt: -1 });
     res.status(200).json(entries);
   } catch (error) {
     console.error('[GET ENTRIES ERROR]', error);
     res.status(500).json({ message: 'Failed to fetch entries' });
   }
 };
-
-
 
 
 const saveTicketLimit = async (req, res) => {
@@ -279,9 +282,8 @@ module.exports = {
   saveResult,
     getResult,
       loginUser,
-
-      getEntries, 
-        getNextBill, // ✅ Add this
+        getNextBill,
+        getEntries // ✅ Add this
 
 
 
