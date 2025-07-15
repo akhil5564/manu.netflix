@@ -3,20 +3,25 @@ const Entry = require('./model/Entry');
 const bcrypt = require('bcryptjs');
 const RateMaster = require('./model/RateMaster');
 const Result = require('./model/ResultModel');
+const Counter = require('./model/counters');
 
 const TicketLimit = require('./model/TicketLimit'); // create this model
 const BillCounter = require('./model/BillCounter');
 
-const getNextBill = async () => {
-  const counter = await BillCounter.findOneAndUpdate(
+
+
+
+const getNextBillNumber = async () => {
+  const result = await BillCounter.findOneAndUpdate(
     { name: 'bill' },
     { $inc: { counter: 1 } },
     { new: true, upsert: true }
   );
 
-  // Format to 4-digit (e.g., 0001, 0023);
-  return counter.counter.toString().padStart(4, '0');
+  return result.counter.toString().padStart(5, '0'); // ➜ '00001', '00002', ...
 };
+
+
 
 const loginUser = async (req, res) => {
   const { username, password } = req.body;
@@ -214,29 +219,37 @@ const saveResult = async (req, res) => {
 
 
 // ✅ Add Entries
+
 const addEntries = async (req, res) => {
   try {
-    const { entries, timeLabel, timeCode, createdBy } = req.body;
+    const { entries, timeLabel, timeCode, createdBy, toggleCount } = req.body;
 
     if (!entries || entries.length === 0) {
       return res.status(400).json({ message: 'No entries provided' });
     }
+
+    const billNo = await getNextBillNumber(); // e.g., '00001', '00002'
 
     const toSave = entries.map(e => ({
       ...e,
       timeLabel,
       timeCode,
       createdBy,
+      billNo,
+      toggleCount,
+      createdAt: new Date(),
     }));
 
     await Entry.insertMany(toSave);
 
-    res.status(200).json({ message: 'Entries saved successfully' });
+    res.status(200).json({ message: 'Entries saved successfully', billNo });
   } catch (error) {
     console.error('[SAVE ENTRY ERROR]', error);
     res.status(500).json({ message: 'Server error saving entries' });
   }
 };
+
+
 
 // ✅ Get Result (by date and time)
 
@@ -283,7 +296,8 @@ module.exports = {
     getResult,
       loginUser,
         getNextBill,
-        getEntries // ✅ Add this
+        getEntries,
+        getNextBillNumber // ✅ Add this
 
 
 

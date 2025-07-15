@@ -1,8 +1,16 @@
+// model/BillCounter.js
 const mongoose = require('mongoose');
 
-const billCounterSchema = new mongoose.Schema({
-  name: { type: String, default: 'bill' },
-  counter: { type: Number, default: 1 },
+const BillCounterSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true,
+    default: 'bill'
+  },
+  counter: {
+    type: Number,
+    default: 1
+  }
 });
 
-module.exports = mongoose.model('BillCounter', billCounterSchema);
+module.exports = mongoose.model('BillCounter', BillCounterSchema);
