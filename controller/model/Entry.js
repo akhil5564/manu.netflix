@@ -4,11 +4,12 @@ const EntrySchema = new mongoose.Schema({
   number: String,
   count: Number,
   type: String,
-  timeLabel: String,     // LSK, DEAR etc
-  timeCode: String,      // LSK3, D-1-, etc
+  timeLabel: String,
+  timeCode: String,
   createdBy: String,
-toggleCount:String,
- createdAt: { type: Date, default: Date.now }
+  billNo: Number,
+  toggleCount: Number, // ✅ MUST be added!
+  createdAt: { type: Date, default: Date.now },
 });
 
 module.exports = mongoose.model('Entry', EntrySchema);
