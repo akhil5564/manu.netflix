@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { createUser,getresult,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getEntries,getNextBillNumber,  loginUser,  getNextBill // ✅ Add this
+const { createUser,getresult,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getEntries,getNextBillNumber,  loginUser, // ✅ Add this
 
  } = require('../controller/Controller');
 
@@ -12,7 +12,7 @@ router.post('/ratemaster', saveRateMaster);
 router.post('/addResult', saveResult);
 router.get('/getResult', getResult);
 router.post('/login', loginUser);
-router.get('/next-bill', getNextBill); // ✅ Add this
+router.get('/next-bill', getNextBillNumbe); // ✅ Add this
 router.get('/entries', getEntries); // 👈 Add this
 router.post('/addEntries', addEntries);
 

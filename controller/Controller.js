@@ -3,7 +3,6 @@ const Entry = require('./model/Entry');
 const bcrypt = require('bcryptjs');
 const RateMaster = require('./model/RateMaster');
 const Result = require('./model/ResultModel');
-const Counter = require('./model/counters');
 
 const TicketLimit = require('./model/TicketLimit'); // create this model
 const BillCounter = require('./model/BillCounter');
@@ -295,7 +294,6 @@ module.exports = {
   saveResult,
     getResult,
       loginUser,
-        getNextBill,
         getEntries,
         getNextBillNumber // ✅ Add this
 
