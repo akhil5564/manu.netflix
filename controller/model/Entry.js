@@ -8,8 +8,14 @@ const EntrySchema = new mongoose.Schema({
   timeCode: String,
   createdBy: String,
   billNo: Number,
-  toggleCount: Number, // ✅ MUST be added!
+  toggleCount: Number,
   createdAt: { type: Date, default: Date.now },
+
+  // ✅ Correct placement of isValid
+  isValid: {
+    type: Boolean,
+    default: true,
+  },
 });
 
 module.exports = mongoose.model('Entry', EntrySchema);

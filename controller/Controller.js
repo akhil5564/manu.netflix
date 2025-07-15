@@ -71,6 +71,8 @@ const getEntries = async (req, res) => {
     } = req.query;
 
     const query = {};
+    query.isValid = true; // fetch only valid entries
+
     if (createdBy) query.createdBy = createdBy;
     if (timeCode) query.timeCode = timeCode;
     if (timeLabel) query.timeLabel = timeLabel;
@@ -85,6 +87,28 @@ if (billNo) query.billNo = billNo;
     console.error('[GET ENTRIES ERROR]', error);
     res.status(500).json({ message: 'Failed to fetch entries' });
   } 
+};
+
+
+const invalidateEntry = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const updated = await Entry.findByIdAndUpdate(
+      id,
+      { isValid: false },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ message: 'Entry not found' });
+    }
+
+    res.status(200).json({ message: 'Marked as invalid' });
+  } catch (err) {
+    console.error('[INVALIDATE ENTRY ERROR]', err);
+    res.status(500).json({ message: 'Server error' });
+  }
 };
 
 
@@ -300,11 +324,11 @@ module.exports = {
   saveTicketLimit,
   saveRateMaster,
   saveResult,
-    getResult,
-      loginUser,
-        getEntries,
-        getNextBillNumber // ✅ Add this
-
+  getResult,
+  loginUser,
+  getEntries,
+  getNextBillNumber,
+  invalidateEntry,
 
 
 };

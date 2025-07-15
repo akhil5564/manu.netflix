@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { createUser,getresult,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getEntries,getNextBillNumber,  loginUser, // ✅ Add this
+const { createUser,getresult,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getEntries,getNextBillNumber,  loginUser, invalidateEntry// ✅ Add this
 
  } = require('../controller/Controller');
 
@@ -15,6 +15,7 @@ router.post('/login', loginUser);
 router.get('/next-bill', getNextBillNumbe); // ✅ Add this
 router.get('/entries', getEntries); // 👈 Add this
 router.post('/addEntries', addEntries);
+router.patch('/invalidateEntry/:id', invalidateEntry);
 
 
 module.exports = router;
