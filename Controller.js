@@ -5,6 +5,21 @@ const RateMaster = require('./model/RateMaster');
 const Result = require('./model/ResultModel');
 
 const TicketLimit = require('./model/TicketLimit'); // create this model
+const BillCounter = require('./model/BillCounter');
+
+
+
+
+const getNextBillNumber = async () => {
+  const result = await BillCounter.findOneAndUpdate(
+    { name: 'bill' },
+    { $inc: { counter: 1 } },
+    { new: true, upsert: true }
+  );
+
+  return result.counter.toString().padStart(5, '0'); // ➜ '00001', '00002', ...
+};
+
 
 
 const loginUser = async (req, res) => {
@@ -41,24 +56,36 @@ const loginUser = async (req, res) => {
 
 
 // ✅ Get Entries (filterable)
+
+
 const getEntries = async (req, res) => {
   try {
-    const { createdBy, timeCode, date } = req.query;
+    const {
+      createdBy,
+      timeCode,
+      timeLabel,
+      number,
+      count,
+      date,
+      billNo, // ✅ ADD THIS
+    } = req.query;
 
     const query = {};
     if (createdBy) query.createdBy = createdBy;
     if (timeCode) query.timeCode = timeCode;
+    if (timeLabel) query.timeLabel = timeLabel;
+    if (number) query['entries.number'] = number;
+    if (count) query['entries.count'] = parseInt(count);
     if (date) query.date = date;
+    if (billNo) query.billNo = billNo; // ✅ FILTER BY BILL NUMBER
 
-    const entries = await Entry.find(query).sort({ createdAt: -1 }); // Optional sorting
+    const entries = await Entry.find(query).sort({ createdAt: -1 });
     res.status(200).json(entries);
   } catch (error) {
     console.error('[GET ENTRIES ERROR]', error);
     res.status(500).json({ message: 'Failed to fetch entries' });
   }
 };
-
-
 
 
 const saveTicketLimit = async (req, res) => {
@@ -199,29 +226,37 @@ const saveResult = async (req, res) => {
 
 
 // ✅ Add Entries
+
 const addEntries = async (req, res) => {
   try {
-    const { entries, timeLabel, timeCode, createdBy } = req.body;
+    const { entries, timeLabel, timeCode, createdBy, toggleCount } = req.body;
 
     if (!entries || entries.length === 0) {
       return res.status(400).json({ message: 'No entries provided' });
     }
+
+    const billNo = await getNextBillNumber(); // e.g., '00001', '00002'
 
     const toSave = entries.map(e => ({
       ...e,
       timeLabel,
       timeCode,
       createdBy,
+      billNo,
+      toggleCount,
+      createdAt: new Date(),
     }));
 
     await Entry.insertMany(toSave);
 
-    res.status(200).json({ message: 'Entries saved successfully' });
+    res.status(200).json({ message: 'Entries saved successfully', billNo });
   } catch (error) {
     console.error('[SAVE ENTRY ERROR]', error);
     res.status(500).json({ message: 'Server error saving entries' });
   }
 };
+
+
 
 // ✅ Get Result (by date and time)
 
@@ -267,8 +302,9 @@ module.exports = {
   saveResult,
     getResult,
       loginUser,
+        getEntries,
+        getNextBillNumber // ✅ Add this
 
-      getEntries, // 👈 New export
 
 
 };
