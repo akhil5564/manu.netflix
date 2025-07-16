@@ -128,6 +128,25 @@ const deleteEntryById = async (req, res) => {
   }
 };
 
+
+
+const deleteEntriesByBillNo = async (req, res) => {
+  try {
+    const { billNo } = req.params;
+
+    const result = await Entry.deleteMany({ billNo });
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ message: 'No entries found with this bill number' });
+    }
+
+    res.status(200).json({ message: 'Entries deleted successfully' });
+  } catch (err) {
+    console.error('[DELETE BY BILL NO ERROR]', err);
+    res.status(500).json({ message: 'Server error while deleting entries' });
+  }
+};
+
+
 const saveTicketLimit = async (req, res) => {
   try {
     const { group1, group2, group3, createdBy } = req.body;
@@ -346,6 +365,6 @@ module.exports = {
   getNextBillNumber,
   invalidateEntry,
   deleteEntryById, // ✅ add this
-
+deleteEntriesByBillNo
 
 };
