@@ -21,38 +21,48 @@ const getNextBillNumber = async () => {
 };
 
 
-
 const loginUser = async (req, res) => {
-  const { username, password } = req.body;
-
   try {
-    // Find user by username
-    const user = await MainUser.findOne({ username });
+    const { username, password } = req.body;
 
-    if (!user) {
-      return res.status(404).json({ message: 'Invalid username' });
+    if (!username || !password) {
+      return res.status(400).json({ message: 'Username and password required' });
     }
 
-    // Compare the provided password with the hashed password
+    const user = await User.findOne({
+      username: { $regex: new RegExp(`^${username}$`, 'i') }
+    });
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
     const isMatch = await bcrypt.compare(password, user.password);
 
     if (!isMatch) {
       return res.status(401).json({ message: 'Invalid password' });
     }
 
-    // ✅ If both username and password match, return user info
-    res.status(200).json({
-      username: user.username,
-      usertype: user.usertype,
-      name: user.name,
-      createdBy: user.createdBy,
+    // Do not send full user with hashed password
+    return res.status(200).json({
+      message: 'Login successful',
+      user: {
+        id: user._id,
+        username: user.username,
+        userType: user.userType,
+        scheme: user.scheme || null,
+      },
     });
-
-  } catch (err) {
-    console.error('[LOGIN ERROR]', err);
-    res.status(500).json({ message: 'Server error' });
+  } catch (error) {
+    console.error('[LOGIN ERROR]', error.message, error.stack); // Improved error logging
+    return res.status(500).json({ message: 'Server error' });
   }
 };
+
+
+
+
+
 
 
 // ✅ Get Entries (filterable)
@@ -356,6 +366,35 @@ const updateEntryCount = async (req, res) => {
 };
 
 
+
+// ✅ New: Get total count grouped by number
+const getCountReport = async (req, res) => {
+  try {
+    const entries = await Entry.find({ isValid: true }); // Only valid entries
+
+    const countMap = {};
+
+    entries.forEach(entry => {
+      const num = entry.number;
+      if (!countMap[num]) {
+        countMap[num] = {
+          number: num,
+          count: 0,
+        };
+      }
+      countMap[num].count += entry.count;
+    });
+
+    const result = Object.values(countMap).sort((a, b) => b.count - a.count);
+
+    res.status(200).json(result);
+  } catch (err) {
+    console.error('[COUNT REPORT ERROR]', err);
+    res.status(500).json({ message: 'Server error while generating report' });
+  }
+};
+
+
 // ✅ Get All Users (optionally filter by createdBy)
 const getAllUsers = async (req, res) => {
   try {
@@ -385,6 +424,6 @@ module.exports = {
   deleteEntryById, // ✅ add this
 deleteEntriesByBillNo,
   updateEntryCount,
-
+  getCountReport,
 
 };
