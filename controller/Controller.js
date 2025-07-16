@@ -111,6 +111,22 @@ const invalidateEntry = async (req, res) => {
   }
 };
 
+const deleteEntryById = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const deletedEntry = await Entry.findByIdAndDelete(id);
+
+    if (!deletedEntry) {
+      return res.status(404).json({ message: 'Entry not found' });
+    }
+
+    res.status(200).json({ message: 'Entry deleted successfully' });
+  } catch (err) {
+    console.error('[DELETE ENTRY ERROR]', err);
+    res.status(500).json({ message: 'Server error while deleting entry' });
+  }
+};
 
 const saveTicketLimit = async (req, res) => {
   try {
@@ -329,6 +345,7 @@ module.exports = {
   getEntries,
   getNextBillNumber,
   invalidateEntry,
+  deleteEntryById, // ✅ add this
 
 
 };
