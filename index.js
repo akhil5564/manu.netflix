@@ -1,7 +1,7 @@
 const express = require('express');
 const dotenv = require('dotenv');
 const connectDB = require('./database/model/ConnectToDb');
-const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getResult, loginUser,getNextBillNumber,getEntries,invalidateEntry // ✅ Add this
+const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getResult, loginUser,getNextBillNumber,getEntries,invalidateEntry,deleteEntryById// ✅ Add this
 
 } = require('./controller/Controller');
 const app = express();
@@ -23,6 +23,7 @@ app.post('/login', loginUser);
 app.get('/next-bill', getNextBillNumber); // ✅ Add this
 app.post('/addEntries', addEntries);
 app.patch('/invalidateEntry/:id', invalidateEntry);
+app.delete('/deleteEntryById/:id', deleteEntryById);
 
 const port = process.env.PORT || 5000;
 app.listen(port, () => {

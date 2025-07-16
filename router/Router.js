@@ -12,7 +12,7 @@ router.post('/ratemaster', saveRateMaster);
 router.post('/addResult', saveResult);
 router.get('/getResult', getResult);
 router.post('/login', loginUser);
-router.get('/next-bill', getNextBillNumbe); // ✅ Add this
+router.get('/next-bill', getNextBillNumber); // ✅ Add this
 router.get('/entries', getEntries); // 👈 Add this
 router.post('/addEntries', addEntries);
 router.patch('/invalidateEntry/:id', invalidateEntry);
