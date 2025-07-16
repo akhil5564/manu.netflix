@@ -338,6 +338,24 @@ const saveRateMaster = async (req, res) => {
   }
 };
 
+
+const updateEntryCount = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { count } = req.body;
+    if (!count || isNaN(count)) return res.status(400).json({ message: 'Invalid count' });
+
+    const updated = await Entry.findByIdAndUpdate(id, { count: parseInt(count) }, { new: true });
+    if (!updated) return res.status(404).json({ message: 'Entry not found' });
+
+    res.status(200).json({ message: 'Count updated successfully', entry: updated });
+  } catch (err) {
+    console.error('[UPDATE ENTRY COUNT ERROR]', err);
+    res.status(500).json({ message: 'Server error updating count' });
+  }
+};
+
+
 // ✅ Get All Users (optionally filter by createdBy)
 const getAllUsers = async (req, res) => {
   try {
@@ -365,6 +383,8 @@ module.exports = {
   getNextBillNumber,
   invalidateEntry,
   deleteEntryById, // ✅ add this
-deleteEntriesByBillNo
+deleteEntriesByBillNo,
+  updateEntryCount,
+
 
 };
