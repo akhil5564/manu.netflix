@@ -20,7 +20,6 @@ const getNextBillNumber = async () => {
   return result.counter.toString().padStart(5, '0'); // ➜ '00001', '00002', ...
 };
 
-
 const loginUser = async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -29,8 +28,8 @@ const loginUser = async (req, res) => {
       return res.status(400).json({ message: 'Username and password required' });
     }
 
-    const user = await User.findOne({
-      username: { $regex: new RegExp(`^${username}$`, 'i') }
+    const user = await MainUser.findOne({
+      username: { $regex: new RegExp(`^${username}$`, 'i') },
     });
 
     if (!user) {
@@ -43,18 +42,18 @@ const loginUser = async (req, res) => {
       return res.status(401).json({ message: 'Invalid password' });
     }
 
-    // Do not send full user with hashed password
+    // Return structured login response
     return res.status(200).json({
       message: 'Login successful',
       user: {
         id: user._id,
         username: user.username,
-        userType: user.userType,
+        userType: user.usertype,  // ✅ use `usertype` from schema
         scheme: user.scheme || null,
       },
     });
   } catch (error) {
-    console.error('[LOGIN ERROR]', error.message, error.stack); // Improved error logging
+    console.error('[LOGIN ERROR]', error.message, error.stack);
     return res.status(500).json({ message: 'Server error' });
   }
 };
