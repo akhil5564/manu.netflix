@@ -76,7 +76,9 @@ const getEntries = async (req, res) => {
       number,
       count,
       date,
-      billNo, // ✅ ADD THIS
+      fromDate,
+      toDate,
+      billNo,
     } = req.query;
 
     const query = {};
@@ -87,16 +89,26 @@ const getEntries = async (req, res) => {
     if (timeLabel) query.timeLabel = timeLabel;
     if (number) query['entries.number'] = number;
     if (count) query['entries.count'] = parseInt(count);
-    if (date) query.date = date;
-if (billNo) query.billNo = billNo;
+    if (billNo) query.billNo = billNo;
+
+    // ✅ Handle date or date range
+    if (fromDate && toDate) {
+      query.date = {
+        $gte: fromDate,
+        $lte: toDate,
+      };
+    } else if (date) {
+      query.date = date;
+    }
 
     const entries = await Entry.find(query).sort({ createdAt: -1 });
     res.status(200).json(entries);
   } catch (error) {
     console.error('[GET ENTRIES ERROR]', error);
     res.status(500).json({ message: 'Failed to fetch entries' });
-  } 
+  }
 };
+
 
 
 const invalidateEntry = async (req, res) => {
