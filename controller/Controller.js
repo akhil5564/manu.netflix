@@ -82,7 +82,7 @@ const getEntries = async (req, res) => {
       toDate,
     } = req.query;
 
-    const query = { isValid: true }; // fetch only valid entries
+    const query = { isValid: true };
 
     if (createdBy) query.createdBy = createdBy;
     if (timeCode) query.timeCode = timeCode;
@@ -91,11 +91,10 @@ const getEntries = async (req, res) => {
     if (count) query['entries.count'] = parseInt(count);
     if (billNo) query.billNo = billNo;
 
-    // Handle either `date` or `fromDate`/`toDate`
     if (date) {
       query.date = date;
     } else if (fromDate && toDate) {
-      query.date = { $gte: fromDate, $lte: toDate }; // Assumes stored as 'YYYY-MM-DD'
+      query.date = { $gte: fromDate, $lte: toDate };
     }
 
     const entries = await Entry.find(query).sort({ createdAt: -1 });
@@ -105,7 +104,6 @@ const getEntries = async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch entries' });
   }
 };
-
 
 
 
