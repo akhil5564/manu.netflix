@@ -67,7 +67,6 @@ const loginUser = async (req, res) => {
 // ✅ Get Entries (filterable)
 
 
-
 const getEntries = async (req, res) => {
   try {
     const {
@@ -92,9 +91,12 @@ const getEntries = async (req, res) => {
     if (billNo) query.billNo = billNo;
 
     if (date) {
-      query.date = date;
+      query.date = new Date(date);
     } else if (fromDate && toDate) {
-      query.date = { $gte: fromDate, $lte: toDate };
+      const from = new Date(fromDate);
+      const to = new Date(toDate);
+      to.setHours(23, 59, 59, 999); // end of day
+      query.date = { $gte: from, $lte: to };
     }
 
     const entries = await Entry.find(query).sort({ createdAt: -1 });
