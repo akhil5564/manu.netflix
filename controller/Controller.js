@@ -67,6 +67,8 @@ const loginUser = async (req, res) => {
 // ✅ Get Entries (filterable)
 
 
+const Entry = require('./model/Entry'); // Ensure correct path
+
 const getEntries = async (req, res) => {
   try {
     const {
@@ -76,13 +78,12 @@ const getEntries = async (req, res) => {
       number,
       count,
       date,
+      billNo,
       fromDate,
       toDate,
-      billNo,
     } = req.query;
 
-    const query = {};
-    query.isValid = true; // fetch only valid entries
+    const query = { isValid: true }; // fetch only valid entries
 
     if (createdBy) query.createdBy = createdBy;
     if (timeCode) query.timeCode = timeCode;
@@ -91,14 +92,11 @@ const getEntries = async (req, res) => {
     if (count) query['entries.count'] = parseInt(count);
     if (billNo) query.billNo = billNo;
 
-    // ✅ Handle date or date range
-    if (fromDate && toDate) {
-      query.date = {
-        $gte: fromDate,
-        $lte: toDate,
-      };
-    } else if (date) {
+    // Handle either `date` or `fromDate`/`toDate`
+    if (date) {
       query.date = date;
+    } else if (fromDate && toDate) {
+      query.date = { $gte: fromDate, $lte: toDate }; // Assumes stored as 'YYYY-MM-DD'
     }
 
     const entries = await Entry.find(query).sort({ createdAt: -1 });
@@ -108,6 +106,9 @@ const getEntries = async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch entries' });
   }
 };
+
+module.exports = { getEntries };
+
 
 
 
