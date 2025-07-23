@@ -12,6 +12,8 @@ const mainUserSchema = new mongoose.Schema({
     default: 'sub',
   },
   createdAt: { type: Date, default: Date.now },
+  blocked: { type: Boolean, default: false },
+
 });
 
 module.exports = mongoose.model('MainUser', mainUserSchema);

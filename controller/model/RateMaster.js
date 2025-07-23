@@ -1,16 +1,19 @@
-// models/RateMaster.js
 const mongoose = require('mongoose');
-
-const rateSchema = new mongoose.Schema({
-  name: String,
-  rate: String,
-  assignRate: String,
-});
 
 const rateMasterSchema = new mongoose.Schema({
   user: String,
   draw: String,
-  rates: [rateSchema],
-}, { timestamps: true });
+  rates: [
+    {
+      name: String,
+      rate: Number,
+      assignRate: Number,
+    },
+  ],
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+});
 
 module.exports = mongoose.model('RateMaster', rateMasterSchema);
