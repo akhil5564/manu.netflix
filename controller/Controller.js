@@ -373,6 +373,26 @@ const saveRateMaster = async (req, res) => {
   }
 };
 
+// GET /rateMaster?user=vig&draw=LSK
+const getRateMaster = async (req, res) => {
+  try {
+    const { user, draw } = req.query;
+    if (!user || !draw) {
+      return res.status(400).json({ message: 'User and draw are required' });
+    }
+
+    const rateDoc = await RateMaster.findOne({ user, draw });
+    if (!rateDoc) {
+      return res.status(404).json({ message: 'No rate found' });
+    }
+
+    res.json(rateDoc);
+  } catch (error) {
+    console.error('[GET RATE MASTER ERROR]', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 
 const updateEntryCount = async (req, res) => {
   try {
@@ -450,5 +470,6 @@ module.exports = {
 deleteEntriesByBillNo,
   updateEntryCount,
   getCountReport,
+  getRateMaster
 
 };

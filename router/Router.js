@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { createUser,getresult,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getEntries,getNextBillNumber,  loginUser, invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,
+const { createUser,getresult,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getEntries,getNextBillNumber,  loginUser, invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster
 // ✅ Add this
 
  } = require('../controller/Controller');
@@ -21,6 +21,7 @@ router.delete('/deleteEntryById/:id', deleteEntryById);
 router.delete('/deleteEntriesByBillNo/:billNo', deleteEntriesByBillNo);
 router.put('/updateEntryCount/:id',updateEntryCount); // if added
 router.get('/report/count', getCountReport); // ✅ Set route
+router.get('/rateMaster', getRateMaster);
 
 
 module.exports = router;
