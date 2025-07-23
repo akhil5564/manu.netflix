@@ -90,12 +90,21 @@ const getEntries = async (req, res) => {
     if (count) query['entries.count'] = parseInt(count);
     if (billNo) query.billNo = billNo;
 
+    // Handle single date
     if (date) {
-      query.date = new Date(date);
-    } else if (fromDate && toDate) {
+      const d = new Date(date);
+      d.setHours(0, 0, 0, 0);
+      const dEnd = new Date(date);
+      dEnd.setHours(23, 59, 59, 999);
+      query.date = { $gte: d, $lte: dEnd };
+    }
+
+    // Handle date range
+    else if (fromDate && toDate) {
       const from = new Date(fromDate);
+      from.setHours(0, 0, 0, 0); // Start of day
       const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999); // end of day
+      to.setHours(23, 59, 59, 999); // End of day
       query.date = { $gte: from, $lte: to };
     }
 
@@ -106,6 +115,7 @@ const getEntries = async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch entries' });
   }
 };
+
 
 
 
