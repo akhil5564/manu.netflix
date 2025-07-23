@@ -67,7 +67,6 @@ const loginUser = async (req, res) => {
 // ✅ Get Entries (filterable)
 
 
-const Entry = require('./model/Entry'); // Ensure correct path
 
 const getEntries = async (req, res) => {
   try {
@@ -107,7 +106,6 @@ const getEntries = async (req, res) => {
   }
 };
 
-module.exports = { getEntries };
 
 
 
