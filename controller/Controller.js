@@ -96,7 +96,7 @@ const getEntries = async (req, res) => {
       d.setHours(0, 0, 0, 0);
       const dEnd = new Date(date);
       dEnd.setHours(23, 59, 59, 999);
-      query.date = { $gte: d, $lte: dEnd };
+      query.createdAt = { $gte: d, $lte: dEnd };
     }
 
     // Handle date range
@@ -105,7 +105,7 @@ const getEntries = async (req, res) => {
       from.setHours(0, 0, 0, 0); // Start of day
       const to = new Date(toDate);
       to.setHours(23, 59, 59, 999); // End of day
-      query.date = { $gte: from, $lte: to };
+      query.createdAt = { $gte: from, $lte: to };
     }
 
     const entries = await Entry.find(query).sort({ createdAt: -1 });
