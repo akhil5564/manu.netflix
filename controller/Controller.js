@@ -372,6 +372,20 @@ const saveRateMaster = async (req, res) => {
     res.status(500).json({ message: 'Server error saving rate master' });
   }
 };
+const handleSave = async () => {
+  try {
+    const payload = {
+      user: selectedUser,
+      draw: selectedDraw,
+      rates: modifiedRates,
+    };
+
+    await saveRateData(payload); // ✅ Calls API correctly
+  } catch (error) {
+    console.error('Error in handleSave:', error);
+  }
+};
+
 
 
 // GET /rateMaster?user=vig&draw=LSK
