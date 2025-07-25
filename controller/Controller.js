@@ -363,6 +363,13 @@ const saveRateMaster = async (req, res) => {
       return res.status(400).json({ message: 'Missing user, draw, or rates' });
     }
 
+    // Optional: Check each rate has label & rate
+    for (const item of rates) {
+      if (!item.label || typeof item.rate !== 'number') {
+        return res.status(400).json({ message: 'Each rate must have a label and rate' });
+      }
+    }
+
     const newRate = new RateMaster({ user, draw, rates });
     await newRate.save();
 
