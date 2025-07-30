@@ -1,7 +1,7 @@
 const express = require('express');
 const dotenv = require('dotenv');
 const connectDB = require('./database/model/ConnectToDb');
-const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getResult, loginUser,getNextBillNumber,getEntries,invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster
+const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getResult, loginUser,getNextBillNumber,getEntries,invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster,getBlockTime,setBlockTime,countByNumber
 // ✅ Add this
 
 } = require('./controller/Controller');
@@ -29,6 +29,10 @@ app.delete('/deleteEntriesByBillNo/:billNo', deleteEntriesByBillNo);
 app.put('/updateEntryCount/:id', updateEntryCount); // if added
 app.get('/report/count', getCountReport); // ✅ Set route
 app.get('/rateMaster', getRateMaster);
+app.post('/setBlockTime', setBlockTime);
+app.get('/getBlockTime/:drawLabel', getBlockTime);
+app.post('/countByNumber', countByNumber);
+
 
 const port = process.env.PORT || 5000;
 app.listen(port, () => {

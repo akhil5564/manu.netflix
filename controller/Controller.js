@@ -3,11 +3,93 @@ const Entry = require('./model/Entry');
 const bcrypt = require('bcryptjs');
 const RateMaster = require('./model/RateMaster');
 const Result = require('./model/ResultModel');
+const BlockTime = require('./model/BlockTime');
 
 const TicketLimit = require('./model/TicketLimit'); // create this model
 const BillCounter = require('./model/BillCounter');
 
+// ✅ Get block time for a draw
+const getBlockTime = async (req, res) => {
+  const { drawLabel } = req.params;
+  try {
+    const record = await BlockTime.findOne({ drawLabel });
+    if (!record) {
+      return res.status(404).json({ message: 'Block time not found' });
+    }
+    return res.status(200).json(record);
+  } catch (error) {
+    console.error('Error retrieving block time:', error);
+    return res.status(500).json({ message: 'Error retrieving block time' });
+  }
+};
 
+// ✅ Get all block times (optional for admin view)
+const getAllBlockTimes = async (req, res) => {
+  try {
+    const records = await BlockTime.find({});
+    return res.status(200).json(records);
+  } catch (error) {
+    console.error('Error retrieving block times:', error);
+    return res.status(500).json({ message: 'Error retrieving block times' });
+  }
+};
+// ✅ Save or update block time
+
+const countByNumber = async (req, res) => {
+  try {
+    const { numbers, date, timeLabel } = req.body;
+
+    if (!Array.isArray(numbers) || !date || !timeLabel) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    const results = await Entry.aggregate([
+      {
+        $match: {
+          number: { $in: numbers },
+          date,
+          timeLabel,
+        },
+      },
+      {
+        $group: {
+          _id: '$number',
+          total: { $sum: '$count' },
+        },
+      },
+    ]);
+
+    const countMap = {};
+    results.forEach((item) => {
+      countMap[item._id] = item.total;
+    });
+
+    res.json(countMap);
+  } catch (err) {
+    console.error('❌ Error in countByNumber:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+
+const setBlockTime = async (req, res) => {
+  const { drawLabel, blockTime } = req.body;
+  if (!drawLabel || !blockTime) {
+    return res.status(400).json({ message: 'drawLabel and blockTime are required' });
+  }
+
+  try {
+    const updated = await BlockTime.findOneAndUpdate(
+      { drawLabel },
+      { blockTime },
+      { new: true, upsert: true }
+    );
+    return res.status(200).json(updated);
+  } catch (error) {
+    console.error('Error saving block time:', error);
+    return res.status(500).json({ message: 'Error saving block time' });
+  }
+};
 
 
 const getNextBillNumber = async () => {
@@ -479,6 +561,9 @@ module.exports = {
 deleteEntriesByBillNo,
   updateEntryCount,
   getCountReport,
-  getRateMaster
+  getRateMaster,
+    setBlockTime,
+  getBlockTime,
+  countByNumber,
 
 };
