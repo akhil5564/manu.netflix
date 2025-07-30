@@ -43,12 +43,16 @@ const countByNumber = async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
+    // Convert date string to start and end of the day
+    const start = new Date(`${date}T00:00:00.000Z`);
+    const end = new Date(`${date}T23:59:59.999Z`);
+
     const results = await Entry.aggregate([
       {
         $match: {
           number: { $in: numbers },
-          date,
           timeLabel,
+          createdAt: { $gte: start, $lte: end }, // ✅ correct date filtering
         },
       },
       {
@@ -64,12 +68,14 @@ const countByNumber = async (req, res) => {
       countMap[item._id] = item.total;
     });
 
+    console.log('✅ Returning countMap:', countMap);
     res.json(countMap);
   } catch (err) {
     console.error('❌ Error in countByNumber:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
+
 
 
 const setBlockTime = async (req, res) => {
