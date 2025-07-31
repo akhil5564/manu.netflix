@@ -512,19 +512,44 @@ const updateEntryCount = async (req, res) => {
 // ✅ New: Get total count grouped by number
 const getCountReport = async (req, res) => {
   try {
-    const entries = await Entry.find({ isValid: true }); // Only valid entries
+    const { date, time, agent, group } = req.query;
+
+    const query = { isValid: true };
+
+    if (date) {
+      const start = new Date(date + 'T00:00:00.000Z');
+      const end = new Date(date + 'T23:59:59.999Z');
+      query.createdAt = { $gte: start, $lte: end };
+    }
+
+    if (agent) {
+      query.createdBy = agent;
+    }
+
+    if (time && time !== 'ALL') {
+      query.timeLabel = time;
+    }
+
+    const entries = await Entry.find(query);
 
     const countMap = {};
 
     entries.forEach(entry => {
-      const num = entry.number;
-      if (!countMap[num]) {
-        countMap[num] = {
-          number: num,
+      const key = group === 'true'
+        ? entry.number // Group only by number
+        : `${entry.number}_${entry.ticket}`; // Group by number + ticket name
+
+      if (!countMap[key]) {
+        countMap[key] = {
+          number: entry.number,
+          ticketName: group === 'true' ? null : entry.ticket,
           count: 0,
+          total: 0,
         };
       }
-      countMap[num].count += entry.count;
+
+      countMap[key].count += entry.count;
+      countMap[key].total += entry.amount;
     });
 
     const result = Object.values(countMap).sort((a, b) => b.count - a.count);
@@ -535,6 +560,7 @@ const getCountReport = async (req, res) => {
     res.status(500).json({ message: 'Server error while generating report' });
   }
 };
+
 
 
 // ✅ Get All Users (optionally filter by createdBy)
