@@ -9,19 +9,29 @@ const TicketLimit = require('./model/TicketLimit'); // create this model
 const BillCounter = require('./model/BillCounter');
 
 // ✅ Get block time for a draw
+
 const getBlockTime = async (req, res) => {
-  const { drawLabel } = req.params;
+  const drawLabel = req.params.drawLabel?.trim();
+
+  if (!drawLabel) {
+    return res.status(400).json({ message: 'Missing drawLabel in request params' });
+  }
+
   try {
     const record = await BlockTime.findOne({ drawLabel });
+
     if (!record) {
-      return res.status(404).json({ message: 'Block time not found' });
+      return res.status(404).json({ message: `No block time found for ${drawLabel}` });
     }
+
     return res.status(200).json(record);
   } catch (error) {
-    console.error('Error retrieving block time:', error);
-    return res.status(500).json({ message: 'Error retrieving block time' });
+    console.error(`Error retrieving block time for "${drawLabel}":`, error);
+    return res.status(500).json({ message: 'Server error while fetching block time' });
   }
 };
+
+
 
 // ✅ Get all block times (optional for admin view)
 const getAllBlockTimes = async (req, res) => {
@@ -77,25 +87,37 @@ const countByNumber = async (req, res) => {
 };
 
 
-
 const setBlockTime = async (req, res) => {
-  const { drawLabel, blockTime } = req.body;
-  if (!drawLabel || !blockTime) {
-    return res.status(400).json({ message: 'drawLabel and blockTime are required' });
+  const { blocks } = req.body;
+
+  if (!Array.isArray(blocks)) {
+    return res.status(400).json({ message: 'blocks must be an array' });
   }
 
   try {
-    const updated = await BlockTime.findOneAndUpdate(
-      { drawLabel },
-      { blockTime },
-      { new: true, upsert: true }
+    const results = await Promise.all(
+      blocks.map(({ draw, timeblock }) => {
+        if (!draw || !timeblock) {
+          throw new Error('Both draw and timeblock are required.');
+        }
+        return BlockTime.findOneAndUpdate(
+          { drawLabel: draw },
+          { blockTime: timeblock },
+          { upsert: true, new: true }
+        );
+      })
     );
-    return res.status(200).json(updated);
+
+    return res.status(200).json({
+      message: 'Block times saved',
+      results,
+    });
   } catch (error) {
     console.error('Error saving block time:', error);
-    return res.status(500).json({ message: 'Error saving block time' });
+    return res.status(500).json({ message: error.message || 'Server error' });
   }
 };
+
 
 
 const getNextBillNumber = async () => {
