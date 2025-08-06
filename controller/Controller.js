@@ -318,6 +318,17 @@ const saveTicketLimit = async (req, res) => {
 };
 
 
+const getLatestTicketLimit = async (req, res) => {
+  try {
+    const latest = await TicketLimit.findOne().sort({ _id: -1 }); // latest record
+    if (!latest) return res.status(404).json({ message: 'No limits found' });
+
+    res.status(200).json(latest);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
 // ✅ GET: Get result for specific date and time
 const getResult = async (req, res) => {
   const { date, time } = req.query;
@@ -619,5 +630,6 @@ deleteEntriesByBillNo,
     setBlockTime,
   getBlockTime,
   countByNumber,
+   getLatestTicketLimit 
 
 };
