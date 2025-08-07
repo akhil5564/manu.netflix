@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { createUser,getresult,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getEntries,getNextBillNumber,  loginUser, invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster,getBlockTime,setBlockTime,countByNumber, getLatestTicketLimit 
+const { createUser,getresult,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getEntries,getNextBillNumber,  loginUser, invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster,getBlockTime,setBlockTime,countByNumber, getLatestTicketLimit ,toggleLoginBlock
 // ✅ Add this
 
  } = require('../controller/Controller');
@@ -26,5 +26,6 @@ router.post('/setBlockTime', setBlockTime);
 router.get('/getBlockTime/:drawLabel', getBlockTime);
 router.post('/countByNumber', countByNumber);
 router.get('/getticketLimit', getLatestTicketLimit);
+router.patch("/user/blockLogin/:id", toggleLoginBlock);
 
 module.exports = router;
