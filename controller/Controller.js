@@ -40,17 +40,18 @@ const toggleLoginBlock = async (req, res) => {
     const user = await MainUser.findById(userId);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    user.loginBlocked = !user.loginBlocked; // toggle
+    user.blocked = !user.blocked; // ✅ match frontend field name
     await user.save();
 
     res.json({
-      message: `User login ${user.loginBlocked ? "blocked" : "unblocked"}`,
+      message: `User login ${user.blocked ? "blocked" : "unblocked"}`,
       user,
     });
   } catch (error) {
     res.status(500).json({ message: "Error updating user", error });
   }
 };
+
 // ✅ Get all block times (optional for admin view)
 const getAllBlockTimes = async (req, res) => {
   try {
