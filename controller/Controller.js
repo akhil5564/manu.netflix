@@ -7,6 +7,7 @@ const BlockTime = require('./model/BlockTime');
 
 const TicketLimit = require('./model/TicketLimit'); // create this model
 const BillCounter = require('./model/BillCounter');
+const User = require('./model/MainUser'); // adjust the path to where your MainUser.js is
 
 // ✅ Get block time for a draw
 
@@ -31,6 +32,27 @@ const getBlockTime = async (req, res) => {
   }
 };
 
+const toggleSalesBlock = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Find the user
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Toggle the salesBlocked status
+    user.salesBlocked = !user.salesBlocked;
+    await user.save();
+
+    res.json({
+      message: `User sales block status updated to ${user.salesBlocked}`,
+      user,
+    });
+  } catch (err) {
+    console.error('❌ Error toggling sales block:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
 
 
 const toggleLoginBlock = async (req, res) => {
@@ -650,6 +672,7 @@ deleteEntriesByBillNo,
   getBlockTime,
   countByNumber,
    getLatestTicketLimit ,
-   toggleLoginBlock
+   toggleLoginBlock,
+   toggleSalesBlock
 
 };

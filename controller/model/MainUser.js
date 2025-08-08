@@ -13,6 +13,7 @@ const mainUserSchema = new mongoose.Schema({
   },
   createdAt: { type: Date, default: Date.now },
   blocked: { type: Boolean, default: false },
+  salesBlocked: { type: Boolean, default: false },  // Sales block ✅
 
 });
 
