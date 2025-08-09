@@ -137,20 +137,20 @@ const setBlockTime = async (req, res) => {
 
   try {
     const results = await Promise.all(
-      blocks.map(({ draw, timeblock }) => {
-        if (!draw || !timeblock) {
-          throw new Error('Both draw and timeblock are required.');
+      blocks.map(({ draw, blockTime, unblockTime }) => {
+        if (!draw || !blockTime || !unblockTime) {
+          throw new Error('draw, blockTime, and unblockTime are all required.');
         }
         return BlockTime.findOneAndUpdate(
           { drawLabel: draw },
-          { blockTime: timeblock },
+          { blockTime, unblockTime },
           { upsert: true, new: true }
         );
       })
     );
 
     return res.status(200).json({
-      message: 'Block times saved',
+      message: 'Block and Unblock times saved',
       results,
     });
   } catch (error) {
