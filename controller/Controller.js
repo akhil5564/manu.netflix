@@ -193,12 +193,11 @@ const loginUser = async (req, res) => {
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
-
     if (!isMatch) {
       return res.status(401).json({ message: 'Invalid password' });
     }
 
-    // ✅ Structured login response
+    // ✅ Structured login response (include salesBlocked)
     return res.status(200).json({
       message: 'Login successful',
       user: {
@@ -206,6 +205,8 @@ const loginUser = async (req, res) => {
         username: user.username,
         userType: user.usertype,
         scheme: user.scheme || null,
+        salesBlocked: user.salesBlocked ?? false, // ✅ FIX
+        isLoginBlocked: user.blocked
       },
     });
   } catch (error) {
@@ -213,7 +214,6 @@ const loginUser = async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 };
-
 
 
 
