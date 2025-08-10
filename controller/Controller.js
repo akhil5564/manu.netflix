@@ -401,42 +401,57 @@ const getLatestTicketLimit = async (req, res) => {
 // ✅ GET: Get result for specific date and time
 const getResult = async (req, res) => {
   try {
-    const { date, time } = req.query;
+    const { fromDate, toDate, time } = req.query;
 
-    if (!date || !time) {
-      return res.status(400).json({ message: 'Missing date or time parameter' });
+    if (!time) {
+      return res.status(400).json({ message: 'Missing time parameter' });
     }
 
-    // Find the result document by date and time
-    const resultDoc = await Result.findOne({ date, time }).lean();
-
-    if (!resultDoc) {
-      return res.status(404).json({ message: 'Result not found for given date and time' });
+    // Validate dates: If fromDate and toDate are provided, use them; else fallback to single date query
+    if ((!fromDate || !toDate) && !req.query.date) {
+      return res.status(400).json({ message: 'Missing date or date range parameters' });
     }
 
-    // Assume resultDoc.prizes is an array of the first 5 prizes as strings
-    // and resultDoc.entries contains the "others" prizes as objects with 'result' field
+    let query = { time };
 
-    // Defensive checks:
-    const firstFive = Array.isArray(resultDoc.prizes) ? resultDoc.prizes : [];
-    const othersRaw = Array.isArray(resultDoc.entries) ? resultDoc.entries : [];
+    if (fromDate && toDate) {
+      // Query for all results between fromDate and toDate (inclusive)
+      query.date = {
+        $gte: new Date(fromDate),
+        $lte: new Date(toDate),
+      };
+    } else if (req.query.date) {
+      query.date = req.query.date;
+    }
 
-    // Extract only the 'result' field from others entries, filter out empty/null results
-    const others = othersRaw
-      .map(entry => entry.result)
-      .filter(r => r && r.length > 0);
+    // Find all matching result documents
+    const resultDocs = await Result.find(query).lean();
 
-    // Construct response object
-    const response = {
-      "1": firstFive[0] || null,
-      "2": firstFive[1] || null,
-      "3": firstFive[2] || null,
-      "4": firstFive[3] || null,
-      "5": firstFive[4] || null,
-      others
-    };
+    if (!resultDocs || resultDocs.length === 0) {
+      return res.status(404).json({ message: 'No results found for given parameters' });
+    }
 
-    res.json(response);
+    // Map each document to response format
+    const results = resultDocs.map((resultDoc) => {
+      const firstFive = Array.isArray(resultDoc.prizes) ? resultDoc.prizes : [];
+      const othersRaw = Array.isArray(resultDoc.entries) ? resultDoc.entries : [];
+
+      const others = othersRaw
+        .map(entry => entry.result)
+        .filter(r => r && r.length > 0);
+
+      return {
+        date: resultDoc.date,
+        "1": firstFive[0] || null,
+        "2": firstFive[1] || null,
+        "3": firstFive[2] || null,
+        "4": firstFive[3] || null,
+        "5": firstFive[4] || null,
+        others,
+      };
+    });
+
+    res.json(results); // returns array of result objects for each date
   } catch (error) {
     console.error('[GET RESULT ERROR]', error);
     res.status(500).json({ message: 'Failed to fetch result' });
