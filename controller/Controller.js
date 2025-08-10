@@ -271,33 +271,32 @@ const getEntries = async (req, res) => {
     if (createdBy) query.createdBy = createdBy;
     if (timeCode) query.timeCode = timeCode;
     if (timeLabel) query.timeLabel = timeLabel;
-    if (number) query['entries.number'] = number;
-    if (count) query['entries.count'] = parseInt(count);
+    if (number) query.number = number;
+    if (count) query.count = parseInt(count);
     if (billNo) query.billNo = billNo;
 
-    // Handle single date
+    // Single date filter
     if (date) {
-      const d = new Date(date);
-      d.setHours(0, 0, 0, 0);
-      const dEnd = new Date(date);
-      dEnd.setHours(23, 59, 59, 999);
-      query.createdAt = { $gte: d, $lte: dEnd };
+      const start = new Date(date);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(date);
+      end.setHours(23, 59, 59, 999);
+      query.createdAt = { $gte: start, $lte: end };
     }
-
-    // Handle date range
+    // Date range filter
     else if (fromDate && toDate) {
-      const from = new Date(fromDate);
-      from.setHours(0, 0, 0, 0); // Start of day
-      const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999); // End of day
-      query.createdAt = { $gte: from, $lte: to };
+      const start = new Date(fromDate);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(toDate);
+      end.setHours(23, 59, 59, 999);
+      query.createdAt = { $gte: start, $lte: end };
     }
 
     const entries = await Entry.find(query).sort({ createdAt: -1 });
     res.status(200).json(entries);
   } catch (error) {
-    console.error('[GET ENTRIES ERROR]', error);
-    res.status(500).json({ message: 'Failed to fetch entries' });
+    console.error("[GET ENTRIES ERROR]", error);
+    res.status(500).json({ message: "Failed to fetch entries" });
   }
 };
 
@@ -401,34 +400,39 @@ const getLatestTicketLimit = async (req, res) => {
 
 // ✅ GET: Get result for specific date and time
 const getResult = async (req, res) => {
-  const { date, time } = req.query;
-
   try {
-    const result = await Result.findOne({ date, time });
-
-    if (!result) {
-      return res.status(404).json({ message: 'No result found' });
+    const { date, time } = req.query;
+    if (!date || !time) {
+      return res.status(400).json({ error: "date and time are required" });
     }
 
-    const response = {
-      results: {
-        [date]: [
-          {
-            [time]: {
-              prizes: result.prizes,
-              entries: result.entries,
-            },
-          },
-        ],
-      },
-    };
+    const results = await Result.find({ date, time }).sort({ createdAt: 1 });
 
-    res.json(response);
-  } catch (error) {
-    console.error('Fetch Error:', error);
-    res.status(500).json({ message: 'Failed to get result' });
+    if (!results.length) {
+      return res.status(404).json({ error: "No results found" });
+    }
+
+    const prizeMap = {};
+    const others = [];
+
+    results.forEach((r) => {
+      switch (r.ticket) {
+        case "1": prizeMap["1"] = r.result; break;
+        case "2": prizeMap["2"] = r.result; break;
+        case "3": prizeMap["3"] = r.result; break;
+        case "4": prizeMap["4"] = r.result; break;
+        case "5": prizeMap["5"] = r.result; break;
+        default: others.push(r.result);
+      }
+    });
+
+    res.json({ ...prizeMap, others });
+  } catch (err) {
+    console.error("Error fetching result:", err);
+    res.status(500).json({ error: "Internal Server Error" });
   }
 };
+
 
 
 // ✅ Create New User
