@@ -402,36 +402,50 @@ const getLatestTicketLimit = async (req, res) => {
 const getResult = async (req, res) => {
   try {
     const { date, time } = req.query;
+
     if (!date || !time) {
-      return res.status(400).json({ error: "date and time are required" });
+      return res.status(400).json({ message: 'Missing date or time parameter' });
     }
 
-    const results = await Result.find({ date, time }).sort({ createdAt: 1 });
+    // Find the result document by date and time
+    const resultDoc = await Result.findOne({ date, time }).lean();
 
-    if (!results.length) {
-      return res.status(404).json({ error: "No results found" });
+    if (!resultDoc) {
+      return res.status(404).json({ message: 'Result not found for given date and time' });
     }
 
-    const prizeMap = {};
-    const others = [];
+    // Assume resultDoc.prizes is an array of the first 5 prizes as strings
+    // and resultDoc.entries contains the "others" prizes as objects with 'result' field
 
-    results.forEach((r) => {
-      switch (r.ticket) {
-        case "1": prizeMap["1"] = r.result; break;
-        case "2": prizeMap["2"] = r.result; break;
-        case "3": prizeMap["3"] = r.result; break;
-        case "4": prizeMap["4"] = r.result; break;
-        case "5": prizeMap["5"] = r.result; break;
-        default: others.push(r.result);
-      }
-    });
+    // Defensive checks:
+    const firstFive = Array.isArray(resultDoc.prizes) ? resultDoc.prizes : [];
+    const othersRaw = Array.isArray(resultDoc.entries) ? resultDoc.entries : [];
 
-    res.json({ ...prizeMap, others });
-  } catch (err) {
-    console.error("Error fetching result:", err);
-    res.status(500).json({ error: "Internal Server Error" });
+    // Extract only the 'result' field from others entries, filter out empty/null results
+    const others = othersRaw
+      .map(entry => entry.result)
+      .filter(r => r && r.length > 0);
+
+    // Construct response object
+    const response = {
+      "1": firstFive[0] || null,
+      "2": firstFive[1] || null,
+      "3": firstFive[2] || null,
+      "4": firstFive[3] || null,
+      "5": firstFive[4] || null,
+      others
+    };
+
+    res.json(response);
+  } catch (error) {
+    console.error('[GET RESULT ERROR]', error);
+    res.status(500).json({ message: 'Failed to fetch result' });
   }
 };
+
+
+
+
 
 
 

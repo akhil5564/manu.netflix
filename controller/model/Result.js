@@ -1,10 +1,10 @@
 const mongoose = require('mongoose');
 
 const resultSchema = new mongoose.Schema({
-  ticket: { type: String, required: true },
-  result: { type: String, required: true },
-  date: { type: String, required: true }, // format: YYYY-MM-DD
-  time: { type: String, required: true }, // example: "KERALA 3PM"
+  date: { type: String, required: true },
+  time: { type: String, required: true },
+  prizes: { type: [String], required: true }, // array of prize strings
+  entries: { type: [Object], required: false }, // your entries array (optional)
 }, { timestamps: true });
 
 module.exports = mongoose.model('Result', resultSchema);
