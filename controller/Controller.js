@@ -128,6 +128,35 @@ const countByNumber = async (req, res) => {
 };
 
 
+const updatePasswordController = async (req, res) => {
+  try {
+    const username = req.params.username;
+    const { password } = req.body;
+
+    if (!password || password.trim() === '') {
+      return res.status(400).json({ message: 'Password is required' });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Update user password
+    const updatedUser = await User.findOneAndUpdate(
+      { username },
+      { password: hashedPassword },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json({ message: 'Password updated successfully' });
+  } catch (error) {
+    console.error('Error updating password:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
 const setBlockTime = async (req, res) => {
   const { blocks } = req.body;
 
@@ -673,6 +702,7 @@ deleteEntriesByBillNo,
   countByNumber,
    getLatestTicketLimit ,
    toggleLoginBlock,
-   toggleSalesBlock
+   toggleSalesBlock,
+   updatePasswordController
 
 };

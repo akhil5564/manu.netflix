@@ -1,7 +1,7 @@
 const express = require('express');
 const dotenv = require('dotenv');
 const connectDB = require('./database/model/ConnectToDb');
-const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getResult, loginUser,getNextBillNumber,getEntries,invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster,getBlockTime,setBlockTime,countByNumber, getLatestTicketLimit ,toggleLoginBlock,toggleSalesBlock
+const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getResult, loginUser,getNextBillNumber,getEntries,invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster,getBlockTime,setBlockTime,countByNumber, getLatestTicketLimit ,toggleLoginBlock,toggleSalesBlock,updatePasswordController
 // ✅ Add this
 
 } = require('./controller/Controller');
@@ -35,6 +35,7 @@ app.post('/countByNumber', countByNumber);
 app.get('/getticketLimit', getLatestTicketLimit);
 app.patch("/user/blockLogin/:id", toggleLoginBlock);
 app.patch('/blockSales/:id', toggleSalesBlock); // ✅ New route
+app.put('/users/:username', updatePasswordController);
 
 
 const port = process.env.PORT || 5000;
