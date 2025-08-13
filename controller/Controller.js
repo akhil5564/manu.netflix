@@ -95,13 +95,28 @@ const countByNumber = async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
+    // Convert date string to start and end of the day
     const start = new Date(`${date}T00:00:00.000Z`);
     const end = new Date(`${date}T23:59:59.999Z`);
 
+    // Prepare $or match conditions
     const matchConditions = keys.map((key) => {
-      const [typeSuffix, number] = key.split('-'); // e.g., "AB", "52"
+      const parts = key.split('-');
+      let type, number;
+
+      if (parts.length >= 3) {
+        number = parts.pop();        // last part is number
+        type = parts.join('-');      // remaining parts are type
+      } else if (parts.length === 2) {
+        type = parts[0];
+        number = parts[1];
+      } else {
+        type = parts[0];
+        number = '';
+      }
+
       return {
-        type: { $regex: `${typeSuffix}$` }, // ends with AB/SUPER etc.
+        type,
         number,
         timeLabel,
         createdAt: { $gte: start, $lte: end },
@@ -118,19 +133,31 @@ const countByNumber = async (req, res) => {
       },
     ]);
 
-    // Build response map
+    // Build count map with cleaned keys
     const countMap = {};
-    keys.forEach((key) => (countMap[key] = 0));
+    keys.forEach((key) => {
+      const parts = key.split('-');
+      let cleanType = parts.length >= 3 ? parts.slice(0, -1).join('-') : parts[0];
+      if (cleanType.includes('SUPER')) cleanType = 'SUPER';
+      else cleanType = cleanType.split('-').pop(); // get last meaningful type
+      const number = parts[parts.length - 1];
+      const cleanKey = `${cleanType}-${number}`;
+      countMap[cleanKey] = 0; // default 0
+    });
+
+    // Assign totals from aggregation
     results.forEach((item) => {
-      const typeParts = item._id.type.split('-');
-      const typeSuffix = typeParts[typeParts.length - 1]; // last part of type
-      const key = `${typeSuffix}-${item._id.number}`;
+      let type = item._id.type;
+      if (type.includes('SUPER')) type = 'SUPER';
+      else type = type.split('-').pop();
+      const key = `${type}-${item._id.number}`;
       countMap[key] = item.total;
     });
 
+    console.log('✅ Returning cleaned countMap:', countMap);
     res.json(countMap);
   } catch (err) {
-    console.error('Error in countByNumber:', err);
+    console.error('❌ Error in countByNumber:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -536,20 +563,26 @@ const saveResult = async (req, res) => {
 
     const { prizes, entries } = timeData[time];
 
-    const newResult = new Result({
-      date,
-      time,
-      prizes,
-      entries,
-    });
+    // ✅ Replace old result if same date & time exists
+    const updatedResult = await Result.findOneAndUpdate(
+      { date, time }, // search by date + time
+      { prizes, entries }, // fields to update
+      { upsert: true, new: true } // create if not exists, return updated
+    );
 
-    await newResult.save();
-    res.status(200).json({ message: 'Result saved successfully' });
+    res.status(200).json({
+      message: 'Result saved successfully',
+      result: updatedResult
+    });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: 'Error saving result', error: err.message });
+    console.error('❌ Error saving result:', err);
+    res.status(500).json({
+      message: 'Error saving result',
+      error: err.message
+    });
   }
 };
+
 
 
 // ✅ Add Entries
@@ -562,7 +595,7 @@ const addEntries = async (req, res) => {
       return res.status(400).json({ message: 'No entries provided' });
     }
 
-    const billNo = await getNextBillNumber(); // e.g., '00001', '00002'
+    const billNo = await getNextBillNumber(); // e.g., '00001', '00002' 
 
     const toSave = entries.map(e => ({
       ...e,
