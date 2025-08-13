@@ -86,11 +86,12 @@ const getAllBlockTimes = async (req, res) => {
 };
 // ✅ Save or update block time
 
+
 const countByNumber = async (req, res) => {
   try {
-    const { numbers, date, timeLabel } = req.body;
+    const { keys, date, timeLabel } = req.body;
 
-    if (!Array.isArray(numbers) || !date || !timeLabel) {
+    if (!Array.isArray(keys) || !date || !timeLabel) {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
@@ -98,34 +99,59 @@ const countByNumber = async (req, res) => {
     const start = new Date(`${date}T00:00:00.000Z`);
     const end = new Date(`${date}T23:59:59.999Z`);
 
+    // Prepare $or match conditions (fixed for keys like "D-1-SUPER-999")
+    const matchConditions = keys.map((key) => {
+      const parts = key.split('-');
+      let type, number;
+
+      // For keys like "D-1-SUPER-999" -> type = "D-1-SUPER", number = "999"
+      if (parts.length >= 3) {
+        number = parts.pop();           // last part is number
+        type = parts.join('-');         // remaining parts are type
+      } else if (parts.length === 2) {
+        type = parts[0];
+        number = parts[1];
+      } else {
+        type = parts[0];
+        number = '';
+      }
+
+      return {
+        type,
+        number,
+        timeLabel,
+        createdAt: { $gte: start, $lte: end },
+      };
+    });
+
     const results = await Entry.aggregate([
-      {
-        $match: {
-          number: { $in: numbers },
-          timeLabel,
-          createdAt: { $gte: start, $lte: end }, // ✅ correct date filtering
-        },
-      },
+      { $match: { $or: matchConditions } },
       {
         $group: {
-          _id: '$number',
+          _id: { type: '$type', number: '$number' },
           total: { $sum: '$count' },
         },
       },
     ]);
 
+    // Build count map keyed by "type-number"
     const countMap = {};
+    keys.forEach((key) => (countMap[key] = 0)); // default 0
     results.forEach((item) => {
-      countMap[item._id] = item.total;
+      const key = `${item._id.type}-${item._id.number}`;
+      countMap[key] = item.total;
     });
 
-    console.log('✅ Returning countMap:', countMap);
+    console.log('✅ Returning countMap by type-number:', countMap);
     res.json(countMap);
   } catch (err) {
-    console.error('❌ Error in countByNumber:', err);
+    console.error('❌ Error in countByNumberType:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
+
+
+module.exports = countByNumber;
 
 
 const updatePasswordController = async (req, res) => {
@@ -457,8 +483,6 @@ const getResult = async (req, res) => {
     res.status(500).json({ message: 'Failed to fetch result' });
   }
 };
-
-
 
 
 
