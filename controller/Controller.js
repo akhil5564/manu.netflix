@@ -95,26 +95,21 @@ const countByNumber = async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
-    // Convert date string to start and end of the day
     const start = new Date(`${date}T00:00:00.000Z`);
     const end = new Date(`${date}T23:59:59.999Z`);
 
-    // Prepare $or match conditions
+    // Helper to normalize type
+    const normalizeType = (rawType) => {
+      if (rawType.includes('SUPER')) return 'SUPER';
+      const parts = rawType.split('-');
+      return parts[parts.length - 1];
+    };
+
+    // Prepare $or match conditions with normalized type
     const matchConditions = keys.map((key) => {
       const parts = key.split('-');
-      let type, number;
-
-      if (parts.length >= 3) {
-        number = parts.pop();        // last part is number
-        type = parts.join('-');      // remaining parts are type
-      } else if (parts.length === 2) {
-        type = parts[0];
-        number = parts[1];
-      } else {
-        type = parts[0];
-        number = '';
-      }
-
+      const number = parts.pop();
+      const type = normalizeType(parts.join('-'));
       return {
         type,
         number,
@@ -137,20 +132,15 @@ const countByNumber = async (req, res) => {
     const countMap = {};
     keys.forEach((key) => {
       const parts = key.split('-');
-      let cleanType = parts.length >= 3 ? parts.slice(0, -1).join('-') : parts[0];
-      if (cleanType.includes('SUPER')) cleanType = 'SUPER';
-      else cleanType = cleanType.split('-').pop(); // get last meaningful type
-      const number = parts[parts.length - 1];
-      const cleanKey = `${cleanType}-${number}`;
-      countMap[cleanKey] = 0; // default 0
+      const number = parts.pop();
+      const cleanType = normalizeType(parts.join('-'));
+      countMap[`${cleanType}-${number}`] = 0;
     });
 
-    // Assign totals from aggregation
+    // Fill with DB results
     results.forEach((item) => {
-      let type = item._id.type;
-      if (type.includes('SUPER')) type = 'SUPER';
-      else type = type.split('-').pop();
-      const key = `${type}-${item._id.number}`;
+      const cleanType = normalizeType(item._id.type);
+      const key = `${cleanType}-${item._id.number}`;
       countMap[key] = item.total;
     });
 
