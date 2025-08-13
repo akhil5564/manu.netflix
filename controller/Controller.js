@@ -87,6 +87,7 @@ const getAllBlockTimes = async (req, res) => {
 // ✅ Save or update block time
 
 
+
 const countByNumber = async (req, res) => {
   try {
     const { keys, date, timeLabel } = req.body;
@@ -95,24 +96,26 @@ const countByNumber = async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
-    const start = new Date(`${date}T00:00:00.000Z`);
-    const end = new Date(`${date}T23:59:59.999Z`);
+    // Convert input date to start/end in UTC
+    const [year, month, day] = date.split('-').map(Number);
+    const start = new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
+    const end = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999));
 
-    // Helper to normalize type
+    // Normalize type helper
     const normalizeType = (rawType) => {
       if (rawType.includes('SUPER')) return 'SUPER';
       const parts = rawType.split('-');
-      return parts[parts.length - 1];
+      return parts.length > 1 ? parts[parts.length - 2] : parts[0];
     };
 
-    // Prepare $or match conditions with normalized type
+    // Prepare match conditions
     const matchConditions = keys.map((key) => {
       const parts = key.split('-');
-      const number = parts.pop();
-      const type = normalizeType(parts.join('-'));
+      const number = parts[parts.length - 1];
+      const type = normalizeType(key);
       return {
-        type,
         number,
+        type: { $regex: type, $options: 'i' }, // match normalized type in DB
         timeLabel,
         createdAt: { $gte: start, $lte: end },
       };
@@ -128,30 +131,29 @@ const countByNumber = async (req, res) => {
       },
     ]);
 
-    // Build count map with cleaned keys
+    // Build response map
     const countMap = {};
     keys.forEach((key) => {
       const parts = key.split('-');
-      const number = parts.pop();
-      const cleanType = normalizeType(parts.join('-'));
-      countMap[`${cleanType}-${number}`] = 0;
+      const number = parts[parts.length - 1];
+      const type = normalizeType(key);
+      countMap[`${type}-${number}`] = 0;
     });
 
-    // Fill with DB results
     results.forEach((item) => {
-      const cleanType = normalizeType(item._id.type);
-      const key = `${cleanType}-${item._id.number}`;
+      const type = normalizeType(item._id.type);
+      const number = item._id.number;
+      const key = `${type}-${number}`;
       countMap[key] = item.total;
     });
 
-    console.log('✅ Returning cleaned countMap:', countMap);
+    console.log('✅ Returning counts:', countMap);
     res.json(countMap);
   } catch (err) {
-    console.error('❌ Error in countByNumber:', err);
+    console.error('❌ countByNumber error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
-
 
 
 
