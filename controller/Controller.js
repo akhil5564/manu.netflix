@@ -95,29 +95,13 @@ const countByNumber = async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
-    // Convert date string to start and end of the day
     const start = new Date(`${date}T00:00:00.000Z`);
     const end = new Date(`${date}T23:59:59.999Z`);
 
-    // Prepare $or match conditions (fixed for keys like "D-1-SUPER-999")
     const matchConditions = keys.map((key) => {
-      const parts = key.split('-');
-      let type, number;
-
-      // For keys like "D-1-SUPER-999" -> type = "D-1-SUPER", number = "999"
-      if (parts.length >= 3) {
-        number = parts.pop();           // last part is number
-        type = parts.join('-');         // remaining parts are type
-      } else if (parts.length === 2) {
-        type = parts[0];
-        number = parts[1];
-      } else {
-        type = parts[0];
-        number = '';
-      }
-
+      const [typeSuffix, number] = key.split('-'); // e.g., "AB", "52"
       return {
-        type,
+        type: { $regex: `${typeSuffix}$` }, // ends with AB/SUPER etc.
         number,
         timeLabel,
         createdAt: { $gte: start, $lte: end },
@@ -134,24 +118,25 @@ const countByNumber = async (req, res) => {
       },
     ]);
 
-    // Build count map keyed by "type-number"
+    // Build response map
     const countMap = {};
-    keys.forEach((key) => (countMap[key] = 0)); // default 0
+    keys.forEach((key) => (countMap[key] = 0));
     results.forEach((item) => {
-      const key = `${item._id.type}-${item._id.number}`;
+      const typeParts = item._id.type.split('-');
+      const typeSuffix = typeParts[typeParts.length - 1]; // last part of type
+      const key = `${typeSuffix}-${item._id.number}`;
       countMap[key] = item.total;
     });
 
-    console.log('✅ Returning countMap by type-number:', countMap);
     res.json(countMap);
   } catch (err) {
-    console.error('❌ Error in countByNumberType:', err);
+    console.error('Error in countByNumber:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
 
 
-module.exports = countByNumber;
+
 
 
 const updatePasswordController = async (req, res) => {
