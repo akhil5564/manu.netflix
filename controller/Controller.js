@@ -96,31 +96,27 @@ const countByNumber = async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields' });
     }
 
-    // Convert input date to start/end in UTC
-    const [year, month, day] = date.split('-').map(Number);
-    const start = new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
-    const end = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999));
-
-    // Normalize type helper
+    // Helper to normalize types
     const normalizeType = (rawType) => {
-      if (rawType.includes('SUPER')) return 'SUPER';
+      if (rawType.toUpperCase().includes('SUPER')) return 'SUPER';
       const parts = rawType.split('-');
-      return parts.length > 1 ? parts[parts.length - 2] : parts[0];
+      return parts.length > 1 ? parts[parts.length - 2].toUpperCase() : parts[0].toUpperCase();
     };
 
-    // Prepare match conditions
+    // Prepare match conditions for MongoDB aggregation
     const matchConditions = keys.map((key) => {
       const parts = key.split('-');
       const number = parts[parts.length - 1];
       const type = normalizeType(key);
       return {
         number,
-        type: { $regex: type, $options: 'i' }, // match normalized type in DB
+        type: { $regex: `^${type}$`, $options: 'i' }, // exact match ignoring case
         timeLabel,
-        createdAt: { $gte: start, $lte: end },
+        date, // match the explicit date sent from frontend
       };
     });
 
+    // Aggregate total counts
     const results = await Entry.aggregate([
       { $match: { $or: matchConditions } },
       {
@@ -131,7 +127,7 @@ const countByNumber = async (req, res) => {
       },
     ]);
 
-    // Build response map
+    // Initialize countMap with all keys defaulting to 0
     const countMap = {};
     keys.forEach((key) => {
       const parts = key.split('-');
@@ -140,6 +136,7 @@ const countByNumber = async (req, res) => {
       countMap[`${type}-${number}`] = 0;
     });
 
+    // Fill in totals from aggregation results
     results.forEach((item) => {
       const type = normalizeType(item._id.type);
       const number = item._id.number;
@@ -147,13 +144,13 @@ const countByNumber = async (req, res) => {
       countMap[key] = item.total;
     });
 
-    console.log('✅ Returning counts:', countMap);
+    console.log('✅ Returning counts for date', date, countMap);
     res.json(countMap);
   } catch (err) {
     console.error('❌ countByNumber error:', err);
     res.status(500).json({ message: 'Server error' });
   }
-};                                                                                  
+};
 
 
 
