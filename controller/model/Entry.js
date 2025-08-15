@@ -11,7 +11,9 @@ const EntrySchema = new mongoose.Schema({
   toggleCount: Number,
   createdAt: { type: Date, default: Date.now },
 
-  // ✅ Correct placement of isValid
+  // ✅ New date field for the entry's effective date
+  date: { type: Date, required: true },
+
   isValid: {
     type: Boolean,
     default: true,
