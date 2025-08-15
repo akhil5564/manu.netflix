@@ -153,7 +153,7 @@ const countByNumber = async (req, res) => {
     console.error('❌ countByNumber error:', err);
     res.status(500).json({ message: 'Server error' });
   }
-};
+};                                                                                  
 
 
 
@@ -581,10 +581,14 @@ const saveResult = async (req, res) => {
 
 const addEntries = async (req, res) => {
   try {
-    const { entries, timeLabel, timeCode, createdBy, toggleCount } = req.body;
+    const { entries, timeLabel, timeCode, createdBy, toggleCount, date } = req.body;
 
     if (!entries || entries.length === 0) {
       return res.status(400).json({ message: 'No entries provided' });
+    }
+
+    if (!date) {
+      return res.status(400).json({ message: 'Date is required' });
     }
 
     const billNo = await getNextBillNumber(); // e.g., '00001', '00002' 
@@ -597,6 +601,7 @@ const addEntries = async (req, res) => {
       billNo,
       toggleCount,
       createdAt: new Date(),
+      date: new Date(date), // ✅ save the computed entry date
     }));
 
     await Entry.insertMany(toSave);
@@ -607,6 +612,7 @@ const addEntries = async (req, res) => {
     res.status(500).json({ message: 'Server error saving entries' });
   }
 };
+
 
 
 
