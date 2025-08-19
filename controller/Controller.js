@@ -9,6 +9,35 @@ const TicketLimit = require('./model/TicketLimit'); // create this model
 const BillCounter = require('./model/BillCounter');
 const User = require('./model/MainUser'); // adjust the path to where your MainUser.js is
 
+
+
+// Delete user controller
+const deleteUser = async (req, res) => {
+  const { id } = req.params;
+
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'User ID is required' });
+  }
+
+  try {
+    const user = await User.findByIdAndDelete(id);
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `User "${user.username}" deleted successfully`,
+      user,
+    });
+  } catch (error) {
+    console.error('❌ Delete user error:', error);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+
 // ✅ Get block time for a draw
 
 const getBlockTime = async (req, res) => {
@@ -763,16 +792,17 @@ module.exports = {
   getNextBillNumber,
   invalidateEntry,
   deleteEntryById, // ✅ add this
-deleteEntriesByBillNo,
+  deleteEntriesByBillNo,
   updateEntryCount,
   getCountReport,
   getRateMaster,
-    setBlockTime,
+  setBlockTime,
   getBlockTime,
+  deleteUser,
   countByNumber,
-   getLatestTicketLimit ,
-   toggleLoginBlock,
-   toggleSalesBlock,
-   updatePasswordController
+  getLatestTicketLimit,
+  toggleLoginBlock,
+  toggleSalesBlock,
+  updatePasswordController
 
 };
