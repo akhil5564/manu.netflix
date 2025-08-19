@@ -16,7 +16,7 @@ app.get('/users', getAllUsers); // 👈 this is the GET route
 app.post('/newuser', createUser); // Direct route
 app.post('/addEntries', addEntries);
 app.post('/ticket-limit', saveTicketLimit);
-app.post('/ratemaster', saveRateMaster);
+app.put('/ratemaster', saveRateMaster);
 app.post('/addResult', saveResult);
 app.get('/getResult', getResult);
 app.get('/entries', getEntries); // 👈 Add this
