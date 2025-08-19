@@ -11,7 +11,7 @@ router.post('/addEntries', addEntries);
 router.get('/users', getAllUsers); // 👈 this is the GET route
 router.post('/ticket-limit', saveTicketLimit);
 router.post('/ratemaster', saveRateMaster);
-router.post('/addResult', saveResult);
+router.put('/addResult', saveResult);
 router.get('/getResult', getResult);
 router.post('/login', loginUser);
 router.get('/next-bill', getNextBillNumber); // ✅ Add this
