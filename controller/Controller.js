@@ -643,33 +643,40 @@ const addEntries = async (req, res) => {
 
 
 // ✅ Get Result (by date and time)
-
-
+// controller/rateMasterController.js
 const saveRateMaster = async (req, res) => {
   try {
     const { user, draw, rates } = req.body;
 
     if (!user || !draw || !Array.isArray(rates)) {
-      return res.status(400).json({ message: 'Missing user, draw, or rates' });
+      return res.status(400).json({ message: "Missing user, draw, or rates" });
     }
 
-    // Optional: Check each rate has label & rate
+    // Validate each rate item
     for (const item of rates) {
-      if (!item.label || typeof item.rate !== 'number') {
-        return res.status(400).json({ message: 'Each rate must have a label and rate' });
+      if (!item.label || typeof item.rate !== "number") {
+        return res
+          .status(400)
+          .json({ message: "Each rate must have a label and numeric rate" });
       }
     }
 
-    const newRate = new RateMaster({ user, draw, rates });
-    await newRate.save();
+    // ✅ Update existing document OR create new if not exists
+    const updatedRate = await RateMaster.findOneAndUpdate(
+      { user, draw },                     // match user + draw
+      { $set: { rates } },                // update rates only
+      { new: true, upsert: true }         // return new doc, create if missing
+    );
 
-    res.status(201).json({ message: 'Rate master saved successfully', data: newRate });
+    res.status(200).json({
+      message: "✅ Rate master saved/updated successfully",
+      data: updatedRate,
+    });
   } catch (error) {
-    console.error('[SAVE RATE MASTER ERROR]', error);
-    res.status(500).json({ message: 'Server error saving rate master' });
+    console.error("[SAVE RATE MASTER ERROR]", error);
+    res.status(500).json({ message: "Server error saving rate master" });
   }
 };
-
 
 
 // GET /rateMaster?user=vig&draw=LSK
