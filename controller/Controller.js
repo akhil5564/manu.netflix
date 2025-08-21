@@ -330,7 +330,7 @@ const getEntries = async (req, res) => {
     if (count) query.count = parseInt(count);
     if (billNo) query.billNo = billNo;
 
-    // Single date filter (use "date" field)
+    // Single date filter (using "date" field)
     if (date) {
       const start = new Date(date);
       start.setHours(0, 0, 0, 0);
@@ -338,7 +338,7 @@ const getEntries = async (req, res) => {
       end.setHours(23, 59, 59, 999);
       query.date = { $gte: start, $lte: end };
     }
-    // Date range filter (use "date" field)
+    // Date range filter (using "date" field)
     else if (fromDate && toDate) {
       const start = new Date(fromDate);
       start.setHours(0, 0, 0, 0);
@@ -347,13 +347,16 @@ const getEntries = async (req, res) => {
       query.date = { $gte: start, $lte: end };
     }
 
-    const entries = await Entry.find(query).sort({ date: -1 });
+    // Sort primarily by date, secondarily by createdAt
+    const entries = await Entry.find(query).sort({ date: -1, createdAt: -1 });
+
     res.status(200).json(entries);
   } catch (error) {
     console.error("[GET ENTRIES ERROR]", error);
     res.status(500).json({ message: "Failed to fetch entries" });
   }
 };
+
 
 
 
