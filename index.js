@@ -1,7 +1,7 @@
 const express = require('express');
 const dotenv = require('dotenv');
 const connectDB = require('./database/model/ConnectToDb');
-const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getResult,deleteUser, loginUser,getNextBillNumber,getEntries,invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster,getBlockTime,setBlockTime,countByNumber, getLatestTicketLimit ,toggleLoginBlock,toggleSalesBlock,updatePasswordController
+const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getResult,deleteUser, loginUser,getNextBillNumber,getEntries,invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster,getBlockTime,setBlockTime,countByNumber, getLatestTicketLimit ,toggleLoginBlock,toggleSalesBlock,updatePasswordController, netPayMultiday
 // ✅ Add this
 
 } = require('./controller/Controller');
@@ -37,7 +37,7 @@ app.patch("/user/blockLogin/:id", toggleLoginBlock);
 app.patch('/blockSales/:id', toggleSalesBlock); // ✅ New route
 app.put('/users/:username', updatePasswordController);
 app.delete('/users/:id', deleteUser);
-
+app.post('/report/netpay-multiday', netPayMultiday);
 
 const port = process.env.PORT || 5000;
 app.listen(port, () => {
