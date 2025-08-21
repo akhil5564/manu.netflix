@@ -612,38 +612,32 @@ const addEntries = async (req, res) => {
     if (!entries || entries.length === 0) {
       return res.status(400).json({ message: 'No entries provided' });
     }
-
     if (!date) {
       return res.status(400).json({ message: 'Date is required' });
     }
 
-    // Ensure every entry has a rate (safety net)
-    const processedEntries = entries.map((e) => ({
+    const billNo = await getNextBillNumber();
+
+    const toSave = entries.map(e => ({
       ...e,
       rate: e.rate || Number(e?.total || (e.number.length === 1 ? 12 : 10) * e.count).toFixed(2),
-    }));
-
-    const billNo = await getNextBillNumber(); // Generate unique bill number
-
-    const toSave = processedEntries.map(e => ({
-      ...e,
       timeLabel,
       timeCode,
       createdBy,
       billNo,
       toggleCount,
       createdAt: new Date(),
-      date: new Date(date), // Save computed date
+      date: new Date(date),
     }));
 
     await Entry.insertMany(toSave);
-
     res.status(200).json({ message: 'Entries saved successfully', billNo });
   } catch (error) {
     console.error('[SAVE ENTRY ERROR]', error);
     res.status(500).json({ message: 'Server error saving entries' });
   }
 };
+
 
 
 
