@@ -8,6 +8,9 @@ const EntrySchema = new mongoose.Schema({
   timeCode: String,
   createdBy: String,
   billNo: Number,
+
+  rate: { type: Number }, // FIXED
+
   toggleCount: Number,
   createdAt: { type: Date, default: Date.now },
 
