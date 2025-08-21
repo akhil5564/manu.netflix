@@ -788,6 +788,193 @@ const getAllUsers = async (req, res) => {
   }
 };
 
+
+const payouts = {
+  SUPER: { 1: 5000, 2: 500, 3: 250, 4: 100, 5: 50, other: 20 },
+  BOX: {
+    normal: { perfect: 3000, permutation: 800 },
+    double: { perfect: 3800, permutation: 1600 },
+  },
+  AB_BC_AC: 700,
+  A_B_C: 100,
+};
+  const calculateWinAmount = (entry, results) => {
+    if (!results || !results["1"]) return 0;
+
+    const firstPrize = results["1"];
+    const others = Array.isArray(results.others) ? results.others : [];
+    const allPrizes = [
+      results["1"],
+      results["2"],
+      results["3"],
+      results["4"],
+      results["5"],
+      ...others,
+    ].filter(Boolean);
+
+    const num = entry.number;
+    const count = entry.count || 0;
+    const baseType = extractBetType(entry.type);
+
+    let winAmount = 0;
+    
+    if (baseType === "SUPER") {
+      const prizePos = allPrizes.indexOf(num) + 1;
+      if (prizePos > 0) {
+        winAmount = (payouts.SUPER[prizePos] || payouts.SUPER.other) * count;
+      }
+    } else if (baseType === "BOX") {
+      if (num === firstPrize) {
+        winAmount = isDoubleNumber(firstPrize)
+          ? payouts.BOX.double.perfect * count
+          : payouts.BOX.normal.perfect * count;
+      } else if (
+        num.split("").sort().join("") === firstPrize.split("").sort().join("")
+      ) {
+        winAmount = isDoubleNumber(firstPrize)
+          ? payouts.BOX.double.permutation * count
+          : payouts.BOX.normal.permutation * count;
+      }
+    } else if (baseType === "AB" && num === firstPrize.slice(0, 2)) {
+      winAmount = payouts.AB_BC_AC * count;
+    } else if (baseType === "BC" && num === firstPrize.slice(1, 3)) {
+      winAmount = payouts.AB_BC_AC * count;
+    } else if (baseType === "AC" && num === firstPrize[0] + firstPrize[2]) {
+      winAmount = payouts.AB_BC_AC * count;
+    } else if (baseType === "A" && num === firstPrize[0]) {
+      winAmount = payouts.A_B_C * count;
+    } else if (baseType === "B" && num === firstPrize[1]) {
+      winAmount = payouts.A_B_C * count;
+    } else if (baseType === "C" && num === firstPrize[2]) {
+      winAmount = payouts.A_B_C * count;
+    }
+
+    return winAmount;
+  };
+function isDoubleNumber(numStr) {
+  return new Set(numStr.split("")).size === 2;
+}
+ function extractBetType(typeStr) {
+  if (!typeStr) return "";
+  const parts = typeStr.split("-");
+  return parts[parts.length - 1]; // Get the last part (SUPER, BOX, etc.)
+}
+// Pseudocode based on your frontend logic
+
+const netPayMultiday = async (req, res) => {
+  const { fromDate, toDate, time, agent } = req.body;
+
+  try {
+    // 1️⃣ Fetch all users once
+    const users = await MainUser.find().select("-password");
+
+    // Recursive helper
+    function getAllDescendants(username, usersList, visited = new Set()) {
+      if (visited.has(username)) return [];
+      visited.add(username);
+
+      const children = usersList.filter(u => u.createdBy === username).map(u => u.username);
+      let all = [...children];
+      children.forEach(child => {
+        all = all.concat(getAllDescendants(child, usersList, visited));
+      });
+      return all;
+    }
+
+    // 2️⃣ Determine target agent(s)
+    const agentUsers = agent
+      ? [agent, ...getAllDescendants(agent, users)]
+      : users.map(u => u.username);
+
+    // 3️⃣ Date range query
+    const start = new Date(fromDate + "T00:00:00.000Z");
+    const end = new Date(toDate + "T23:59:59.999Z");
+
+    // 4️⃣ Fetch all entries in one go (instead of looping per day)
+    const entries = await Entry.find({
+      createdBy: { $in: agentUsers },
+      timeLabel: time,
+      createdAt: { $gte: start, $lte: end }
+    });
+
+    // 5️⃣ Fetch all results for the same range
+    const results = await Result.find({
+      time,
+      date: { $gte: start, $lte: end }
+    }).lean();
+
+    // Make result lookup by date
+    const resultByDate = {};
+    results.forEach(r => {
+      const dateStr = new Date(r.date).toISOString().slice(0, 10); // "YYYY-MM-DD"
+      resultByDate[dateStr] = r;
+    });
+
+    // 6️⃣ Process entries with result of that day
+    const processedEntries = entries.map(entry => {
+      const entryDateStr = entry.createdAt.toISOString().slice(0, 10);
+      const dayResult = resultByDate[entryDateStr] || null;
+
+      return {
+        ...entry.toObject(),
+        winAmount: calculateWinAmount(entry, dayResult),
+        date: entryDateStr
+      };
+    });
+const userRates = await getUserRates(agentUsers, time, req.body.fromAccountSummary, req.body.loggedInUser);
+    if (processedEntries.length === 0) {
+      return res.status(200).json({ message: "No entries found for given date range" });
+    }
+
+    res.json({
+      fromDate,
+      toDate,
+      time,
+      agent: agent || "All Agents",
+      entries: processedEntries,
+      usersList: users.map(u => u.username),
+      userRates
+    });
+  } catch (err) {
+    console.error("[netPayMultiday ERROR]", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+async function getUserRates(usernames, time, fromAccountSummary, loggedInUser) {
+  const encodedDraw = time;
+
+  if (fromAccountSummary) {
+    // Only fetch loggedInUser rate once
+    const adminRateDoc = await RateMaster.findOne({
+      user: loggedInUser,
+      draw: encodedDraw
+    });
+
+    const adminRates = {};
+    (adminRateDoc?.rates || []).forEach(r => {
+      adminRates[r.label] = r.rate;
+    });
+
+    // Apply same rates to all users
+    const ratesMap = {};
+    usernames.forEach(u => (ratesMap[u] = adminRates));
+    return ratesMap;
+  } else {
+    // Fetch each user’s rate
+    const rateDocs = await RateMaster.find({
+      user: { $in: usernames },
+      draw: encodedDraw
+    });
+
+    const ratesMap = {};
+    rateDocs.forEach(doc => {
+      const map = {};
+      doc.rates.forEach(r => (map[r.label] = r.rate));
+      ratesMap[doc.user] = map;
+    });
+    return ratesMap;
+  }
+}
 module.exports = {
   createUser,
   addEntries,
@@ -812,6 +999,8 @@ module.exports = {
   getLatestTicketLimit,
   toggleLoginBlock,
   toggleSalesBlock,
-  updatePasswordController
+  updatePasswordController,
+  netPayMultiday,
+  getUserRates
 
 };
