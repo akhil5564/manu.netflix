@@ -457,6 +457,7 @@ const getLatestTicketLimit = async (req, res) => {
   }
 };
 
+
 // ✅ GET: Get result for specific date and time
 const getResult = async (req, res) => {
   try {
@@ -484,6 +485,7 @@ const getResult = async (req, res) => {
     }
 
     // Find all matching result documents
+  
     const resultDocs = await Result.find(query).lean();
 
     if (!resultDocs || resultDocs.length === 0) {
@@ -798,7 +800,9 @@ const payouts = {
   AB_BC_AC: 700,
   A_B_C: 100,
 };
-  const calculateWinAmount = (entry, results) => {
+
+// Helper function to calculate win amount
+const calculateWinAmount = (entry, results) => {
     if (!results || !results["1"]) return 0;
 
     const firstPrize = results["1"];
@@ -851,14 +855,7 @@ const payouts = {
 
     return winAmount;
   };
-function isDoubleNumber(numStr) {
-  return new Set(numStr.split("")).size === 2;
-}
- function extractBetType(typeStr) {
-  if (!typeStr) return "";
-  const parts = typeStr.split("-");
-  return parts[parts.length - 1]; // Get the last part (SUPER, BOX, etc.)
-}
+
 // Pseudocode based on your frontend logic
 
 const netPayMultiday = async (req, res) => {
@@ -975,6 +972,473 @@ async function getUserRates(usernames, time, fromAccountSummary, loggedInUser) {
     return ratesMap;
   }
 }
+// =======================
+// 📌 Winning Report (multi-day)
+// =======================
+
+
+// ---- helper functions for winning report ----
+function isDoubleNumber(numStr) {
+  return new Set(numStr.split("")).size === 2;
+}
+
+function extractBetType(typeStr) {
+  if (!typeStr) return "";
+  const parts = typeStr.split("-");
+  return parts[parts.length - 1]; // Get the last part (SUPER, BOX, etc.)
+}
+
+// ---- helper functions ----
+// --- Normalize results from multiple docs into one object ---
+function normalizeResultDocs(resultDocs) {
+  const grouped = {};
+
+  for (const doc of resultDocs) {
+    const ds = new Date(doc.date).toISOString().slice(0, 10);
+    const key = `${ds}|${doc.time}`;
+
+    if (!grouped[key]) {
+      grouped[key] = {
+        "1": null, "2": null, "3": null, "4": null, "5": null,
+        others: [],
+      };
+    }
+
+    if (["1", "2", "3", "4", "5"].includes(doc.ticket)) {
+      grouped[key][doc.ticket] = doc.result;
+    } else {
+      grouped[key].others.push(doc.result);
+    }
+  }
+
+  return grouped;
+}
+
+function computeWinType(entry, results) {
+  if (!results) return "";
+  const baseType = extractBetType(entry.type);
+  const num = entry.number;
+  const first = results["1"];
+  const others = results.others || [];
+
+  if (baseType === "SUPER") {
+    if (num === results["1"]) return "SUPER 1";
+    if (num === results["2"]) return "SUPER 2";
+    if (num === results["3"]) return "SUPER 3";
+    if (num === results["4"]) return "SUPER 4";
+    if (num === results["5"]) return "SUPER 5";
+    if (others.includes(num)) return "SUPER other";
+    return "";
+  }
+
+  if (baseType === "BOX" && first) {
+    const isDouble = isDoubleNumber(first);
+    const isPerfect = num === first;
+    const isPerm = num.split("").sort().join("") === first.split("").sort().join("");
+    if (isPerfect) return isDouble ? "BOX double perfect" : "BOX perfect";
+    if (isPerm) return isDouble ? "BOX double permutation" : "BOX permutation";
+    return "";
+  }
+
+  if (["AB","BC","AC","A","B","C"].includes(baseType)) return baseType;
+  return "";
+}
+function getDatesBetween(start, end) {
+  const dates = [];
+  const curr = new Date(start);
+  while (curr <= end) {
+    dates.push(new Date(curr));
+    curr.setDate(curr.getDate() + 1);
+  }
+  return dates;
+}
+// --- MAIN FUNCTION ---
+// =======================
+// 📌 Fixed getWinningReport
+// =======================
+function formatDate(date) {
+  return date.toISOString().slice(0, 10);
+}
+const getWinningReport = async (req, res) => {
+  try {
+    const { fromDate, toDate, time, agent } = req.body;
+    console.log("\n==============================");
+    console.log("📥 getWinningReport request:", req.body);
+
+    if (!fromDate || !toDate || !time) {
+      return res.status(400).json({ message: "fromDate, toDate, and time are required" });
+    }
+
+    // --- 1) Users + descendants ---
+    const users = await MainUser.find().select("-password");
+
+    function getAllDescendants(username, usersList, visited = new Set()) {
+      if (visited.has(username)) return [];
+      visited.add(username);
+      const children = usersList.filter(u => u.createdBy === username).map(u => u.username);
+      let all = [...children];
+      children.forEach(child => {
+        all = all.concat(getAllDescendants(child, usersList, visited));
+      });
+      return all;
+    }
+
+    const agentUsers = agent ? [agent, ...getAllDescendants(agent, users)] : users.map(u => u.username);
+    console.log("👥 Agent Users:", agentUsers);
+
+    // build user->scheme map
+    const userSchemeMap = {};
+    users.forEach(u => { userSchemeMap[u.username] = u.scheme || "N/A"; });
+
+    // --- 2) Date range ---
+    const start = new Date(fromDate + "T00:00:00.000Z");
+    const end   = new Date(toDate   + "T23:59:59.999Z");
+    console.log("📅 Date Range:", start, "to", end);
+
+    // --- 3) Entries ---
+    const entryQuery = {
+      createdBy: { $in: agentUsers },
+      isValid: true,
+      createdAt: { $gte: start, $lte: end },   // ✅ use createdAt instead of date
+    };
+    if (time !== "ALL") entryQuery.timeLabel = time;
+
+    const entries = await Entry.find(entryQuery).lean();
+    console.log("📝 Entries fetched:", entries.length);
+    if (entries.length > 0) {
+      console.log("🔹 Example entry:", entries[0]);
+    }
+
+    if (entries.length === 0) {
+      console.log("⚠️ No entries found.");
+      return res.json({ message: "No entries found", bills: [], grandTotal: 0 });
+    }
+
+    // --- 4) Results ---
+    const allDates = getDatesBetween(new Date(fromDate), new Date(toDate))
+    .map(d => d.toISOString().slice(0, 10)); // ['2025-08-20', '2025-08-21', ...]
+  
+  const resultQuery = { date: { $in: allDates } };
+  if (time !== "ALL") resultQuery.time = time;
+  
+  const resultDocs = await Result.find(resultQuery).lean();
+  console.log("🏆 Results fetched:==", resultDocs.length);
+  
+
+    // Group results by time
+    const resultsByTime = {};
+    for (const r of resultDocs) {
+      if (!resultsByTime[r.time]) resultsByTime[r.time] = [];
+      resultsByTime[r.time].push(r);
+    }
+    for (const t in resultsByTime) {
+      resultsByTime[t].sort((a, b) => new Date(a.date) - new Date(b.date));
+    }
+    console.log("🕒 Results grouped by time:", Object.keys(resultsByTime));
+
+    function findDayResult(dateStr, timeLabel) {
+      const list = resultsByTime[timeLabel] || [];
+      const found = [...list].reverse().find(r => {
+        const rd = new Date(r.date).toISOString().slice(0, 10);
+        return rd === dateStr;
+      });
+      if (!found) return null;
+      const firstFive = Array.isArray(found.prizes) ? found.prizes : [];
+      const othersRaw = Array.isArray(found.entries) ? found.entries : [];
+      const others = othersRaw.map(e => e.result).filter(Boolean);
+      return {
+        "1": firstFive[0] || null,
+        "2": firstFive[1] || null,
+        "3": firstFive[2] || null,
+        "4": firstFive[3] || null,
+        "5": firstFive[4] || null,
+        others
+      };
+    }
+
+    // --- 5) Evaluate wins ---
+    const winningEntries = [];
+    for (const e of entries) {
+      const dateObj = new Date(e.createdAt); // ✅ match frontend behavior
+      const ds = dateObj.toISOString().slice(0, 10);
+
+      const dayResult = findDayResult(ds, e.timeLabel);
+      console.log(`\n➡️ Checking entry bill:${e.billNo}, num:${e.number}, type:${e.type}, date:${ds}, time:${e.timeLabel}`);
+      if (!dayResult) {
+        console.log("   ❌ No matching result found for this entry.");
+        continue;
+      }
+
+      const amount = calculateWinAmount(e, dayResult);
+      const winType = computeWinType(e, dayResult);
+      console.log("   ✅ Found result, winAmount:", amount, "winType:", winType);
+
+      if (amount > 0) {
+        winningEntries.push({
+          ...e,
+          date: ds,
+          winAmount: amount,
+          baseType: extractBetType(e.type),
+          winType,
+        });
+      }
+    }
+
+    console.log("✅ Total winning entries:", winningEntries.length);
+
+    if (winningEntries.length === 0) {
+      console.log("⚠️ No winning entries after evaluation.");
+      return res.json({ message: "No winning entries found", bills: [], grandTotal: 0 });
+    }
+
+    // --- 6) Group into bills ---
+    const billsMap = {};
+    for (const w of winningEntries) {
+      if (!billsMap[w.billNo]) {
+        billsMap[w.billNo] = {
+          billNo: w.billNo,
+          createdBy: w.createdBy,
+          scheme: userSchemeMap[w.createdBy] || "N/A",
+          winnings: [],
+          total: 0
+        };
+      }
+      billsMap[w.billNo].winnings.push({
+        number: w.number,
+        type: w.baseType,
+        winType: w.winType,
+        count: w.count,
+        winAmount: w.winAmount,
+      });
+      billsMap[w.billNo].total += w.winAmount;
+    }
+
+    const bills = Object.values(billsMap);
+    const grandTotal = bills.reduce((acc, bill) => acc + bill.total, 0);
+
+    console.log("📦 Bills grouped:", bills.length, "GrandTotal:", grandTotal);
+
+    return res.json({ fromDate, toDate, time, agent: agent || "All Agents", grandTotal, bills, usersList: users.map(u => u.username) });
+  } catch (err) {
+    console.error("[getWinningReport ERROR]", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+
+
+async function getBlockTimeF(drawLabel) {
+  if (!drawLabel) return null;
+  const record = await BlockTime.findOne({ drawLabel });
+  console.log("drawLabel",drawLabel);
+  
+  if (!record) return null;
+
+  return {
+    blockTime: record.blockTime,
+    unblockTime: record.unblockTime
+  };
+}
+const getTicketLimits = async () => {
+  try {
+    const latest = await TicketLimit.findOne().sort({ _id: -1 }); // latest record
+    if (!latest) {
+      return null
+    }else{
+      return latest
+    }
+  } catch (err) {
+    console.log("sssssssssss",err);
+    return null
+    
+  }
+};
+// Helper function (NOT Express handler anymore)
+const countByNumberF = async (date, timeLabel, keys) => {
+  try {
+    if (!Array.isArray(keys) || !date || !timeLabel) {
+      throw new Error("Missing required fields");
+    }
+
+    // Normalize type helper
+    const normalizeType = (rawType) => {
+      if (rawType.toUpperCase().includes("SUPER")) return "SUPER";
+      const parts = rawType.split("-");
+      return parts.length > 1
+        ? parts[parts.length - 2].toUpperCase()
+        : parts[0].toUpperCase();
+    };
+
+    // Prepare match conditions
+    const matchConditions = keys.map((key) => {
+      const parts = key.split("-");
+      const number = parts[parts.length - 1];
+      const type = normalizeType(key);
+      return {
+        number,
+        type: { $regex: `^${type}$`, $options: "i" },
+        timeLabel,
+        date,
+      };
+    });
+
+    // Run aggregation
+    const results = await Entry.aggregate([
+      { $match: { $or: matchConditions } },
+      {
+        $group: {
+          _id: { type: "$type", number: "$number" },
+          total: { $sum: "$count" },
+        },
+      },
+    ]);
+
+    // Build count map
+    const countMap = {};
+    keys.forEach((key) => {
+      const parts = key.split("-");
+      const number = parts[parts.length - 1];
+      const type = normalizeType(key);
+      countMap[`${type}-${number}`] = 0;
+    });
+
+    results.forEach((item) => {
+      const type = normalizeType(item._id.type);
+      const number = item._id.number;
+      const key = `${type}-${number}`;
+      countMap[key] = item.total;
+    });
+
+    return countMap;
+  } catch (err) {
+    console.error("❌ countByNumber error:", err);
+    throw err;
+  }
+};
+// Pure function, no req/res
+const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCount, date }) => {
+  if (!entries || entries.length === 0) {
+    throw new Error("No entries provided");
+  }
+  if (!date) {
+    throw new Error("Date is required");
+  }
+
+  const billNo = await getNextBillNumber();
+
+  const toSave = entries.map((e) => ({
+    ...e,
+    rate:
+      e.rate ||
+      Number(
+        e?.total || (e.number.length === 1 ? 12 : 10) * e.count
+      ).toFixed(2),
+    timeLabel,
+    timeCode,
+    createdBy,
+    billNo,
+    toggleCount,
+    createdAt: new Date(),
+    date: new Date(date),
+  }));
+
+  await Entry.insertMany(toSave);
+
+  return { message: "Entries saved successfully", billNo };
+};
+
+ const saveValidEntries = async (req, res) => {
+  try {
+    const { entries, timeLabel, timeCode, selectedAgent, createdBy, toggleCount } = req.body;
+    if (!entries || entries.length === 0) {
+      return res.status(400).json({ message: 'No entries provided' });
+    }
+    // 1️⃣ Get block/unblock time
+    const { blockTime, unblockTime } = await getBlockTimeF(timeLabel);
+    if (!blockTime || !unblockTime) return res.status(400).json({ message: 'Block or unblock time missing' });
+
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+    const block = new Date(`${todayStr}T${blockTime}:00`);
+    const unblock = new Date(`${todayStr}T${unblockTime}:00`);
+    if (now >= block && now < unblock) {
+      return res.status(403).json({ message: 'Entry time is blocked for this draw' });
+    }
+
+    // 2️⃣ Fetch ticket limits
+    const limits = await getTicketLimits();
+    const allLimits = { ...limits.group1, ...limits.group2, ...limits.group3 };
+
+    // 3️⃣ Sum counts per type-number for new entries
+    const newTotalByNumberType ={};
+    entries.forEach((entry) => {
+      const rawType = entry.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
+      const key = `${rawType}-${entry.number}`;
+      newTotalByNumberType[key] = (newTotalByNumberType[key] || 0) + (entry.count || 1);
+    });
+
+    // 4️⃣ Fetch existing counts
+    const keys = Object.keys(newTotalByNumberType);
+    const existingCounts = await countByNumberF(todayStr, timeLabel, keys);
+
+    // 5️⃣ Validate entries
+    const totalSoFar = { ...existingCounts };
+    const validEntries= [];
+    const exceededEntries= [];
+
+    for (const entry of entries) {
+      const count = entry.count || 1;
+      const rawType = entry.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
+      const key = `${rawType}-${entry.number}`;
+      const maxLimit = parseInt(allLimits[rawType] || '9999', 10);
+      const currentTotal = totalSoFar[key] || 0;
+      const allowedCount = maxLimit - currentTotal;
+
+      if (allowedCount <= 0) {
+        exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: currentTotal, added: 0 });
+        continue;
+      }
+
+      if (count <= allowedCount) {
+        validEntries.push(entry);
+        totalSoFar[key] = currentTotal + count;
+      } else {
+        validEntries.push({ ...entry, count: allowedCount });
+        totalSoFar[key] = currentTotal + allowedCount;
+        exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: currentTotal, added: allowedCount });
+      }
+    }
+
+    if (validEntries.length === 0) {
+      return res.status(400).json({ message: 'All entries exceed allowed limits', exceeded: exceededEntries });
+    }
+    console.log("aaaaaaaaaaaaaaaaaa", validEntries,
+      timeLabel,
+      timeCode,
+      selectedAgent,
+      createdBy,
+      toggleCount,);
+    
+    // 6️⃣ Save valid entries
+    const savedBill = await addEntriesF({
+      entries: validEntries,
+      timeLabel,
+      timeCode,
+      selectedAgent,
+      createdBy,
+      toggleCount,
+      date:todayStr
+    });
+
+    return res.json({ billNo: savedBill.billNo, exceeded: exceededEntries });
+
+  } catch (err) {
+    console.error('Error saving entries:', err);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+}
+
+
 module.exports = {
   createUser,
   addEntries,
@@ -1001,6 +1465,7 @@ module.exports = {
   toggleSalesBlock,
   updatePasswordController,
   netPayMultiday,
-  getUserRates
-
+  getUserRates,
+  getWinningReport,
+  saveValidEntries
 };
