@@ -687,11 +687,14 @@ const saveRateMaster = async (req, res) => {
 const getRateMaster = async (req, res) => {
   try {
     const { user, draw } = req.query;
+    console.log('req.query===========1', req.query)
     if (!user || !draw) {
       return res.status(400).json({ message: 'User and draw are required' });
     }
-
+    const allDocs = await RateMaster.find({});
+    console.log('All documents:', allDocs);
     const rateDoc = await RateMaster.findOne({ user, draw });
+    console.log('req.query===========',rateDoc)
     if (!rateDoc) {
       return res.status(404).json({ message: 'No rate found' });
     }
@@ -1438,6 +1441,109 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
   }
 }
 
+// 🆕 New endpoint: Sales Report
+const getSalesReport = async (req, res) => {
+  try {
+    const { fromDate, toDate, createdBy, timeLabel, loggedInUser } = req.query;
+
+    console.log("==============================");
+    console.log("📥 getSalesReport request:", req.query);
+
+    // 1️⃣ Build agent list (if createdBy not given, use loggedInUser + descendants)
+    let agentList = [];
+    console.log('agentList===========', agentList)
+    if (!createdBy) {
+      agentList = [loggedInUser, ...getDescendants(loggedInUser)]; 
+    } else {
+      agentList = [createdBy, ...getDescendants(createdBy)];
+    }
+    console.log("👥 Agent Users (backend):", agentList);
+
+    // 2️⃣ Build query for entries
+    const entryQuery = {
+      createdBy: { $in: agentList },
+      date: { $gte: new Date(fromDate), $lte: new Date(toDate) },
+    };
+    if (timeLabel && timeLabel !== "all") {
+      entryQuery.timeLabel = timeLabel;
+    }
+
+    const entries = await Entry.find(entryQuery);
+    console.log("entrie===========1", entryQuery)
+    console.log("entrie===========1", entries)
+    console.log("📝 Entries fetched (backend):", entries.length);
+    if (entries.length > 0) console.log("🔹 Example entry:", entries[0]);
+
+    // 3️⃣ Fetch RateMaster
+    const userForRate = loggedInUser;
+    
+    console.log('userForRate===========', userForRate)
+    console.log('timeLabel===========', timeLabel)
+    const rateMaster = await RateMaster.findOne({ user: userForRate, draw: timeLabel });
+    console.log('rateMaster===========', rateMaster)
+    const rateLookup = {};
+    (rateMaster?.rates || []).forEach(r => {
+      rateLookup[r.label] = Number(r.rate) || 10;
+    });
+    console.log("💰 Rate lookup:", rateLookup);
+
+    // Helper: extract bet type
+    const extractBetType = (typeStr) => {
+      if (!typeStr) return "SUPER";
+      const parts = typeStr.split("-");
+      return parts[parts.length - 1];
+    };
+
+    // 4️⃣ Calculate totals
+    let totalCount = 0;
+    let totalSales = 0;
+
+    entries.forEach(entry => {
+      const count = Number(entry.count) || 0;
+      const betType = extractBetType(entry.type);
+      console.log('betType=============', betType)
+      const rate = rateLookup[betType] ?? 0;
+      console.log('rate=============', rate)
+      totalCount += count;
+      totalSales += count * rate;
+      entry.rate = count * rate;
+    });
+
+    const report = {
+      count: totalCount,
+      amount: totalSales,
+      date: `${fromDate} to ${toDate} (${timeLabel || "all"})`,
+      fromDate,
+      toDate,
+      createdBy,
+      timeLabel,
+      entries,
+    };
+
+    console.log("✅ Final Sales Report (backend):", report);
+    res.json(report);
+
+  } catch (err) {
+    console.error("❌ Error in getSalesReport:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Helper (same logic as frontend getDescendants)
+function getDescendants(user, allUsers = []) {
+  const descendants = [];
+  const stack = [user];
+  while (stack.length) {
+    const current = stack.pop();
+    const children = allUsers.filter(u => u.createdBy === current);
+    children.forEach(c => {
+      descendants.push(c.username);
+      stack.push(c.username);
+    });
+  }
+  return descendants;
+}
+
 
 module.exports = {
   createUser,
@@ -1467,5 +1573,6 @@ module.exports = {
   netPayMultiday,
   getUserRates,
   getWinningReport,
-  saveValidEntries
+  saveValidEntries,
+  getSalesReport
 };

@@ -1,7 +1,7 @@
 const express = require('express');
 const dotenv = require('dotenv');
 const connectDB = require('./database/model/ConnectToDb');
-const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getResult,deleteUser, loginUser,getNextBillNumber,getEntries,invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster,getBlockTime,setBlockTime,countByNumber, getLatestTicketLimit ,toggleLoginBlock,toggleSalesBlock,updatePasswordController, netPayMultiday, getWinningReport, saveValidEntries
+const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getResult,deleteUser, loginUser,getNextBillNumber,getEntries,invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster,getBlockTime,setBlockTime,countByNumber, getLatestTicketLimit ,toggleLoginBlock,toggleSalesBlock,updatePasswordController, netPayMultiday, getWinningReport, saveValidEntries, getSalesReport
 // ✅ Add this
 
 } = require('./controller/Controller');
@@ -39,6 +39,7 @@ app.put('/users/:username', updatePasswordController);
 app.delete('/users/:id', deleteUser);
 app.post('/report/netpay-multiday', netPayMultiday);
 app.post('/report/winningReport', getWinningReport);
+app.get('/report/salesReport', getSalesReport);
 app.post('/entries/saveValidated', saveValidEntries);
 
 const port = process.env.PORT || 5000;
