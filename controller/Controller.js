@@ -651,6 +651,7 @@ const addEntries = async (req, res) => {
 const saveRateMaster = async (req, res) => {
   try {
     const { user, draw, rates } = req.body;
+    console.log('req.body', req.body)
 
     if (!user || !draw || !Array.isArray(rates)) {
       return res.status(400).json({ message: "Missing user, draw, or rates" });
@@ -675,6 +676,7 @@ const saveRateMaster = async (req, res) => {
     res.status(200).json({
       message: "✅ Rate master saved/updated successfully",
       data: updatedRate,
+      status: 200,
     });
   } catch (error) {
     console.error("[SAVE RATE MASTER ERROR]", error);
@@ -687,14 +689,21 @@ const saveRateMaster = async (req, res) => {
 const getRateMaster = async (req, res) => {
   try {
     const { user, draw } = req.query;
-    console.log('req.query===========1', req.query)
     if (!user || !draw) {
       return res.status(400).json({ message: 'User and draw are required' });
     }
-    const allDocs = await RateMaster.find({});
+    let RateMasterQuery={}
+    if(user){
+      RateMasterQuery.user = user
+    }
+    if(draw){
+      RateMasterQuery.draw = draw
+    }if(draw === "LSK 3 PM"){
+      RateMasterQuery.draw = "KERALA 3 PM"
+    }
+    const allDocs = await RateMaster.find({}).sort({ _id: -1 }).limit(2);
     console.log('All documents:', allDocs);
-    const rateDoc = await RateMaster.findOne({ user, draw });
-    console.log('req.query===========',rateDoc)
+    const rateDoc = await RateMaster.findOne(RateMasterQuery);
     if (!rateDoc) {
       return res.status(404).json({ message: 'No rate found' });
     }
@@ -985,11 +994,38 @@ function isDoubleNumber(numStr) {
   return new Set(numStr.split("")).size === 2;
 }
 
-function extractBetType(typeStr) {
-  if (!typeStr) return "";
+// function extractBetType(typeStr) {
+//   if (!typeStr) return "";
+//   const parts = typeStr.split("-");
+//   return parts[parts.length - 1]; // Get the last part (SUPER, BOX, etc.)
+// }
+const extractBetType = (typeStr) => {
+  console.log('typeStr', typeStr);
+  if (!typeStr) return "SUPER";
+  
+  // Handle different patterns: LSK3SUPER, D-1-A, etc.
+  if (typeStr.toUpperCase().includes("SUPER")) {
+    return "SUPER";
+  } else if (typeStr.toUpperCase().includes("BOX")) {
+    return "BOX";
+  } else if (typeStr.toUpperCase().includes("AB")) {
+    return "AB";
+  } else if (typeStr.toUpperCase().includes("BC")) {
+    return "BC";
+  } else if (typeStr.toUpperCase().includes("AC")) {
+    return "AC";
+  } else if (typeStr.includes("-A") || typeStr.endsWith("A")) {
+    return "A";
+  } else if (typeStr.includes("-B") || typeStr.endsWith("B")) {
+    return "B";
+  } else if (typeStr.includes("-C") || typeStr.endsWith("C")) {
+    return "C";
+  }
+  
+  // Fallback: extract from parts
   const parts = typeStr.split("-");
-  return parts[parts.length - 1]; // Get the last part (SUPER, BOX, etc.)
-}
+  return parts[parts.length - 1];
+};
 
 // ---- helper functions ----
 // --- Normalize results from multiple docs into one object ---
@@ -1323,6 +1359,7 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
   if (!entries || entries.length === 0) {
     throw new Error("No entries provided");
   }
+  console.log('date=============', date)
   if (!date) {
     throw new Error("Date is required");
   }
@@ -1344,7 +1381,6 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
     createdAt: new Date(),
     date: new Date(date),
   }));
-
   await Entry.insertMany(toSave);
 
   return { message: "Entries saved successfully", billNo };
@@ -1353,6 +1389,7 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
  const saveValidEntries = async (req, res) => {
   try {
     const { entries, timeLabel, timeCode, selectedAgent, createdBy, toggleCount } = req.body;
+    console.log('req.body;', req.body)
     if (!entries || entries.length === 0) {
       return res.status(400).json({ message: 'No entries provided' });
     }
@@ -1432,6 +1469,7 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
       toggleCount,
       date:todayStr
     });
+    console.log('savedBill', savedBill)
 
     return res.json({ billNo: savedBill.billNo, exceeded: exceededEntries });
 
@@ -1446,12 +1484,10 @@ const getSalesReport = async (req, res) => {
   try {
     const { fromDate, toDate, createdBy, timeLabel, loggedInUser } = req.query;
 
-    console.log("==============================");
     console.log("📥 getSalesReport request:", req.query);
 
     // 1️⃣ Build agent list (if createdBy not given, use loggedInUser + descendants)
     let agentList = [];
-    console.log('agentList===========', agentList)
     if (!createdBy) {
       agentList = [loggedInUser, ...getDescendants(loggedInUser)]; 
     } else {
@@ -1469,8 +1505,10 @@ const getSalesReport = async (req, res) => {
     }
 
     const entries = await Entry.find(entryQuery);
-    console.log("entrie===========1", entryQuery)
-    console.log("entrie===========1", entries)
+    const last10Entries = await Entry.find({}).sort({ _id: -1 }).limit(2);
+    console.log("entrie===========11", entryQuery)
+    console.log("entrie===========12", last10Entries)
+    console.log("entrie===========13", entries);
     console.log("📝 Entries fetched (backend):", entries.length);
     if (entries.length > 0) console.log("🔹 Example entry:", entries[0]);
 
@@ -1479,8 +1517,20 @@ const getSalesReport = async (req, res) => {
     
     console.log('userForRate===========', userForRate)
     console.log('timeLabel===========', timeLabel)
-    const rateMaster = await RateMaster.findOne({ user: userForRate, draw: timeLabel });
+    let rateMasterQuery={
+      user: userForRate,
+    }
+    if(timeLabel && timeLabel !== "all"){
+      rateMasterQuery.draw = timeLabel
+    }
+    if(timeLabel && timeLabel === "LSK 3 PM"){
+      rateMasterQuery.draw = "KERALA 3 PM"
+    }
+    console.log('rateMasterQuery===========', rateMasterQuery)
+    const rateMaster = await RateMaster.findOne(rateMasterQuery);
+    const rateMasters = await RateMaster.find({}).sort({ _id: -1 }).limit(2);
     console.log('rateMaster===========', rateMaster)
+    console.log('rateMasters===========', rateMasters)
     const rateLookup = {};
     (rateMaster?.rates || []).forEach(r => {
       rateLookup[r.label] = Number(r.rate) || 10;
@@ -1489,7 +1539,29 @@ const getSalesReport = async (req, res) => {
 
     // Helper: extract bet type
     const extractBetType = (typeStr) => {
+      console.log('typeStr', typeStr);
       if (!typeStr) return "SUPER";
+      
+      // Handle different patterns: LSK3SUPER, D-1-A, etc.
+      if (typeStr.toUpperCase().includes("SUPER")) {
+        return "SUPER";
+      } else if (typeStr.toUpperCase().includes("BOX")) {
+        return "BOX";
+      } else if (typeStr.toUpperCase().includes("AB")) {
+        return "AB";
+      } else if (typeStr.toUpperCase().includes("BC")) {
+        return "BC";
+      } else if (typeStr.toUpperCase().includes("AC")) {
+        return "AC";
+      } else if (typeStr.includes("-A") || typeStr.endsWith("A")) {
+        return "A";
+      } else if (typeStr.includes("-B") || typeStr.endsWith("B")) {
+        return "B";
+      } else if (typeStr.includes("-C") || typeStr.endsWith("C")) {
+        return "C";
+      }
+      
+      // Fallback: extract from parts
       const parts = typeStr.split("-");
       return parts[parts.length - 1];
     };
@@ -1502,7 +1574,8 @@ const getSalesReport = async (req, res) => {
       const count = Number(entry.count) || 0;
       const betType = extractBetType(entry.type);
       console.log('betType=============', betType)
-      const rate = rateLookup[betType] ?? 0;
+      console.log('betType=============', entry.type)
+      const rate = rateLookup[betType] ?? 10;
       console.log('rate=============', rate)
       totalCount += count;
       totalSales += count * rate;
