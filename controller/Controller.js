@@ -701,11 +701,13 @@ const getRateMaster = async (req, res) => {
     }if(draw === "LSK 3 PM"){
       RateMasterQuery.draw = "KERALA 3 PM"
     }
-    const allDocs = await RateMaster.find({}).sort({ _id: -1 }).limit(2);
+    console.log('RateMasterQuery', RateMasterQuery)
+    // const allDocs = await RateMaster.find({}).sort({ _id: -1 }).limit(2);
+    const allDocs = await RateMaster.find({})
     console.log('All documents:', allDocs);
     const rateDoc = await RateMaster.findOne(RateMasterQuery);
     if (!rateDoc) {
-      return res.status(404).json({ message: 'No rate found' });
+      return res.status(200).json({ message: 'No rate found' });
     }
 
     res.json(rateDoc);
@@ -1394,7 +1396,11 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
       return res.status(400).json({ message: 'No entries provided' });
     }
     // 1️⃣ Get block/unblock time
-    const { blockTime, unblockTime } = await getBlockTimeF(timeLabel);
+    const blockTimeData = await getBlockTimeF(timeLabel);
+    if (!blockTimeData) {
+      return res.status(400).json({ message: `No block time configuration found for draw: ${timeLabel}` });
+    }
+    const { blockTime, unblockTime } = blockTimeData;
     if (!blockTime || !unblockTime) return res.status(400).json({ message: 'Block or unblock time missing' });
 
     const now = new Date();
@@ -1407,6 +1413,9 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
 
     // 2️⃣ Fetch ticket limits
     const limits = await getTicketLimits();
+    if (!limits) {
+      return res.status(400).json({ message: 'No ticket limits configuration found. Please set up ticket limits first.' });
+    }
     const allLimits = { ...limits.group1, ...limits.group2, ...limits.group3 };
 
     // 3️⃣ Sum counts per type-number for new entries
@@ -1512,30 +1521,39 @@ const getSalesReport = async (req, res) => {
     console.log("📝 Entries fetched (backend):", entries.length);
     if (entries.length > 0) console.log("🔹 Example entry:", entries[0]);
 
-    // 3️⃣ Fetch RateMaster
+    // 3️⃣ Fetch RateMaster for each draw
     const userForRate = loggedInUser;
     
     console.log('userForRate===========', userForRate)
     console.log('timeLabel===========', timeLabel)
-    let rateMasterQuery={
-      user: userForRate,
+    
+    // Get unique draws from entries
+    const uniqueDraws = [...new Set(entries.map(entry => entry.timeLabel))];
+    console.log('uniqueDraws===========', uniqueDraws);
+    
+    // Fetch rate masters for each draw
+    const rateMastersByDraw = {};
+    for (const draw of uniqueDraws) {
+      let rateMasterQuery = { user: userForRate };
+      
+      if (draw === "LSK 3 PM") {
+        rateMasterQuery.draw = "KERALA 3 PM";
+      } else {
+        rateMasterQuery.draw = draw;
+      }
+      
+      console.log(`rateMasterQuery for ${draw}:`, rateMasterQuery);
+      const rateMaster = await RateMaster.findOne(rateMasterQuery);
+      console.log(`rateMaster for ${draw}:`, rateMaster);
+      
+      const rateLookup = {};
+      (rateMaster?.rates || []).forEach(r => {
+        rateLookup[r.label] = Number(r.rate) || 10;
+      });
+      rateMastersByDraw[draw] = rateLookup;
     }
-    if(timeLabel && timeLabel !== "all"){
-      rateMasterQuery.draw = timeLabel
-    }
-    if(timeLabel && timeLabel === "LSK 3 PM"){
-      rateMasterQuery.draw = "KERALA 3 PM"
-    }
-    console.log('rateMasterQuery===========', rateMasterQuery)
-    const rateMaster = await RateMaster.findOne(rateMasterQuery);
-    const rateMasters = await RateMaster.find({}).sort({ _id: -1 }).limit(2);
-    console.log('rateMaster===========', rateMaster)
-    console.log('rateMasters===========', rateMasters)
-    const rateLookup = {};
-    (rateMaster?.rates || []).forEach(r => {
-      rateLookup[r.label] = Number(r.rate) || 10;
-    });
-    console.log("💰 Rate lookup:", rateLookup);
+    
+    console.log("💰 Rate masters by draw:", rateMastersByDraw);
 
     // Helper: extract bet type
     const extractBetType = (typeStr) => {
@@ -1573,10 +1591,12 @@ const getSalesReport = async (req, res) => {
     entries.forEach(entry => {
       const count = Number(entry.count) || 0;
       const betType = extractBetType(entry.type);
-      console.log('betType=============', betType)
-      console.log('betType=============', entry.type)
+      const draw = entry.timeLabel;
+      const rateLookup = rateMastersByDraw[draw] || {};
       const rate = rateLookup[betType] ?? 10;
-      console.log('rate=============', rate)
+      
+      console.log(`Entry: ${entry.type}, Draw: ${draw}, BetType: ${betType}, Rate: ${rate}, Count: ${count}`);
+      
       totalCount += count;
       totalSales += count * rate;
       entry.rate = count * rate;
