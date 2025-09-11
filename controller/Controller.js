@@ -319,6 +319,7 @@ const getEntries = async (req, res) => {
       billNo,
       fromDate,
       toDate,
+      loggedInUser
     } = req.query;
 
     const query = { isValid: true };
@@ -349,7 +350,49 @@ const getEntries = async (req, res) => {
 
     // Sort primarily by date, secondarily by createdAt
     const entries = await Entry.find(query).sort({ date: -1, createdAt: -1 });
+    console.log('entries===========', entries)
+    // If loggedInUser exists → adjust rates
+    if (loggedInUser && entries.length > 0) {
+      // Get unique draws
+      const uniqueDraws = [...new Set(entries.map(e => e.timeLabel))];
 
+      // Fetch rate masters for this user
+      const rateMastersByDraw = {};
+      for (const draw of uniqueDraws) {
+        let rateMasterQuery = { user: loggedInUser, draw };
+        if (draw === "LSK 3 PM") {
+          rateMasterQuery.draw = "KERALA 3 PM"; // your special case
+        }
+
+        const rateMaster = await RateMaster.findOne(rateMasterQuery);
+        const rateLookup = {};
+        (rateMaster?.rates || []).forEach(r => {
+          rateLookup[r.label] = Number(r.rate) || 10;
+        });
+        rateMastersByDraw[draw] = rateLookup;
+      }
+
+      // Apply rates to entries
+      const extractBetType = (typeStr) => {
+        if (!typeStr) return "SUPER";
+        if (typeStr.toUpperCase().includes("SUPER")) return "SUPER";
+        if (typeStr.toUpperCase().includes("BOX")) return "BOX";
+        if (typeStr.toUpperCase().includes("AB")) return "AB";
+        if (typeStr.toUpperCase().includes("BC")) return "BC";
+        if (typeStr.toUpperCase().includes("AC")) return "AC";
+        if (typeStr.includes("-A") || typeStr.endsWith("A")) return "A";
+        if (typeStr.includes("-B") || typeStr.endsWith("B")) return "B";
+        if (typeStr.includes("-C") || typeStr.endsWith("C")) return "C";
+        return typeStr.split("-").pop();
+      };
+
+      entries.forEach(e => {
+        const betType = extractBetType(e.type);
+        const rateLookup = rateMastersByDraw[e.timeLabel] || {};
+        const rate = rateLookup[betType] ?? 10; // fallback default
+        e.rate = rate * (Number(e.count) || 0);
+      });
+    }
     res.status(200).json(entries);
   } catch (error) {
     console.error("[GET ENTRIES ERROR]", error);
