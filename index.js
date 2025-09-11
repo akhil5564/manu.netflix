@@ -1,5 +1,6 @@
 const express = require('express');
 const dotenv = require('dotenv');
+dotenv.config();
 const connectDB = require('./database/model/ConnectToDb');
 const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getResult,deleteUser, loginUser,getNextBillNumber,getEntries,invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster,getBlockTime,setBlockTime,countByNumber, getLatestTicketLimit ,toggleLoginBlock,toggleSalesBlock,updatePasswordController, netPayMultiday, getWinningReport, saveValidEntries, getSalesReport
 // ✅ Add this
@@ -7,7 +8,6 @@ const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveRes
 } = require('./controller/Controller');
 const app = express();
 
-dotenv.config();
 connectDB();
 app.use(express.json());
 
@@ -22,7 +22,6 @@ app.get('/getResult', getResult);
 app.get('/entries', getEntries); // 👈 Add this
 app.post('/login', loginUser);
 app.get('/next-bill', getNextBillNumber); // ✅ Add this
-app.post('/addEntries', addEntries);
 app.patch('/invalidateEntry/:id', invalidateEntry);
 app.delete('/deleteEntryById/:id', deleteEntryById);
 app.delete('/deleteEntriesByBillNo/:billNo', deleteEntriesByBillNo);
@@ -45,4 +44,5 @@ app.post('/entries/saveValidated', saveValidEntries);
 const port = process.env.PORT || 5000;
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
+  console.log(`📦 MONGO_URI: ${process.env.MONGO_URI ? "Loaded ✅" : "Missing ❌"}`);
 });

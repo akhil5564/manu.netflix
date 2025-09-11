@@ -1271,7 +1271,6 @@ const getWinningReport = async (req, res) => {
 async function getBlockTimeF(drawLabel) {
   if (!drawLabel) return null;
   const record = await BlockTime.findOne({ drawLabel });
-  console.log("drawLabel",drawLabel);
   
   if (!record) return null;
 
@@ -1397,6 +1396,7 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
     }
     // 1️⃣ Get block/unblock time
     const blockTimeData = await getBlockTimeF(timeLabel);
+    console.log('blockTimeData===========', blockTimeData);
     if (!blockTimeData) {
       return res.status(400).json({ message: `No block time configuration found for draw: ${timeLabel}` });
     }
@@ -1405,11 +1405,27 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
 
     const now = new Date();
     const todayStr = now.toISOString().split('T')[0];
-    const block = new Date(`${todayStr}T${blockTime}:00`);
-    const unblock = new Date(`${todayStr}T${unblockTime}:00`);
+    // const block = new Date(`${todayStr}T${blockTime}:00`);
+    // const unblock = new Date(`${todayStr}T${unblockTime}:00`);
+    const [bh, bm] = blockTime.split(':').map(Number);
+const [uh, um] = unblockTime.split(':').map(Number);
+
+const block = new Date(now.getFullYear(), now.getMonth(), now.getDate(), bh, bm);
+console.log('block', block)
+const unblock = new Date(now.getFullYear(), now.getMonth(), now.getDate(), uh, um);
+console.log('unblock', unblock)
+console.log('unblock', now >= block );
+console.log('unblock', now < unblock)
+
     if (now >= block && now < unblock) {
       return res.status(403).json({ message: 'Entry time is blocked for this draw' });
     }
+    // Decide target date: after unblock -> next day, else today
+    const targetDateObj = new Date(now);
+    if (now >= unblock) {
+      targetDateObj.setDate(targetDateObj.getDate() + 1);
+    }
+    const targetDateStr = targetDateObj.toISOString().split('T')[0];
 
     // 2️⃣ Fetch ticket limits
     const limits = await getTicketLimits();
@@ -1428,7 +1444,7 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
 
     // 4️⃣ Fetch existing counts
     const keys = Object.keys(newTotalByNumberType);
-    const existingCounts = await countByNumberF(todayStr, timeLabel, keys);
+    const existingCounts = await countByNumberF(targetDateStr, timeLabel, keys);
 
     // 5️⃣ Validate entries
     const totalSoFar = { ...existingCounts };
@@ -1476,7 +1492,7 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
       selectedAgent,
       createdBy,
       toggleCount,
-      date:todayStr
+      date: targetDateStr
     });
     console.log('savedBill', savedBill)
 
@@ -1495,12 +1511,13 @@ const getSalesReport = async (req, res) => {
 
     console.log("📥 getSalesReport request:", req.query);
 
-    // 1️⃣ Build agent list (if createdBy not given, use loggedInUser + descendants)
+    // 1️⃣ Build agent list (loggedInUser or createdBy + descendants)
+    const allUsers = await MainUser.find().select("username createdBy");
     let agentList = [];
     if (!createdBy) {
-      agentList = [loggedInUser, ...getDescendants(loggedInUser)]; 
+      agentList = [loggedInUser, ...getDescendants(loggedInUser, allUsers)];
     } else {
-      agentList = [createdBy, ...getDescendants(createdBy)];
+      agentList = [createdBy, ...getDescendants(createdBy, allUsers)];
     }
     console.log("👥 Agent Users (backend):", agentList);
 
@@ -1602,6 +1619,18 @@ const getSalesReport = async (req, res) => {
       entry.rate = count * rate;
     });
 
+    // 5️⃣ Build optional per-agent summary
+    const perAgentMap = {};
+    entries.forEach((entry) => {
+      const agent = entry.createdBy || "unknown";
+      if (!perAgentMap[agent]) {
+        perAgentMap[agent] = { agent, count: 0, amount: 0 };
+      }
+      perAgentMap[agent].count += Number(entry.count) || 0;
+      perAgentMap[agent].amount += Number(entry.rate) || 0;
+    });
+    const byAgent = Object.values(perAgentMap).sort((a, b) => b.amount - a.amount);
+
     const report = {
       count: totalCount,
       amount: totalSales,
@@ -1611,6 +1640,7 @@ const getSalesReport = async (req, res) => {
       createdBy,
       timeLabel,
       entries,
+      byAgent,
     };
 
     console.log("✅ Final Sales Report (backend):", report);
