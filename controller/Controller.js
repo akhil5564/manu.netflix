@@ -504,35 +504,27 @@ const getLatestTicketLimit = async (req, res) => {
 // ✅ GET: Get result for specific date and time
 const getResult = async (req, res) => {
   try {
-    const { fromDate, toDate, time } = req.query;
-
+    const { date, time } = req.query;
+console.log('req.query', req.query);
     if (!time) {
       return res.status(400).json({ message: 'Missing time parameter' });
     }
 
-    // Validate dates: If fromDate and toDate are provided, use them; else fallback to single date query
-    if ((!fromDate || !toDate) && !req.query.date) {
-      return res.status(400).json({ message: 'Missing date or date range parameters' });
+    if (!date) {
+      return res.status(400).json({ message: 'Missing date parameter' });
     }
 
-    let query = { time };
-
-    if (fromDate && toDate) {
-      // Query for all results between fromDate and toDate (inclusive)
-      query.date = {
-        $gte: new Date(fromDate),
-        $lte: new Date(toDate),
-      };
-    } else if (req.query.date) {
-      query.date = req.query.date;
-    }
+    let query = { time, date };
 
     // Find all matching result documents
   
     const resultDocs = await Result.find(query).lean();
+    const resultDoc = await Result.find({}).lean();
+    // console.log('resultDoc=>>>>>>>>>>>>>>>>', resultDoc)
+    console.log('resultDoc=>>>>>>>>>>>>>>>>', resultDocs)
 
     if (!resultDocs || resultDocs.length === 0) {
-      return res.status(404).json({ message: 'No results found for given parameters' });
+      return res.status(200).json({ message: 'No results found for given parameters',status:0 });
     }
 
     // Map each document to response format
@@ -555,10 +547,12 @@ const getResult = async (req, res) => {
       };
     });
 
-    res.json(results); // returns array of result objects for each date
+    console.log('results=>>>>>>>>>>>>>>>>', results)
+    return res.status(200).json({data:results,status:1,message:'Result fetched successfully'});
+    // return res.json(results); // returns array of result objects for each date
   } catch (error) {
     console.error('[GET RESULT ERROR]', error);
-    res.status(500).json({ message: 'Failed to fetch result' });
+    return res.status(500).json({ message: 'Failed to fetch result' });
   }
 };
 
@@ -917,7 +911,7 @@ const calculateWinAmount = (entry, results) => {
 
 const netPayMultiday = async (req, res) => {
   const { fromDate, toDate, time, agent } = req.body;
-
+console.log('req.body=>>>>>>>>>>>>>>>>', req.body);
   try {
     // 1️⃣ Fetch all users once
     const users = await MainUser.find().select("-password");
@@ -948,26 +942,38 @@ const netPayMultiday = async (req, res) => {
     const entries = await Entry.find({
       createdBy: { $in: agentUsers },
       timeLabel: time,
-      createdAt: { $gte: start, $lte: end }
-    });
-
-    // 5️⃣ Fetch all results for the same range
-    const results = await Result.find({
-      time,
       date: { $gte: start, $lte: end }
-    }).lean();
-
+    });
+    // 5️⃣ Fetch all results for the same range
+    // Remove space before the last 2 characters (PM/AM)
+    let filterTime = time.replace(/\s+(PM|AM)$/gi, '$1');
+    console.log('Original time:', time);
+    console.log('Filtered time:', filterTime);
+    
+    const resultQuery = {
+      time: filterTime,
+      date: { $gte: fromDate, $lte: toDate }
+    };
+    const results = await Result.find(resultQuery).lean();
+    // const resultss = await Result.find({}).limit(5);
+    console.log('resultQuery=>>>>>>>>>>>>>>>>', resultQuery);
+    // console.log('results=>>>>>>>>>>>>>>>>', results);
+    // console.log('resultss=>>>>>>>>>>>>>>>>', resultss);
     // Make result lookup by date
     const resultByDate = {};
     results.forEach(r => {
       const dateStr = new Date(r.date).toISOString().slice(0, 10); // "YYYY-MM-DD"
+      console.log('dateStr', dateStr)
       resultByDate[dateStr] = r;
     });
 
     // 6️⃣ Process entries with result of that day
     const processedEntries = entries.map(entry => {
-      const entryDateStr = entry.createdAt.toISOString().slice(0, 10);
+      const entryDateStr = entry.date.toISOString().slice(0, 10);
+      console.log('entryDateStr======', entryDateStr)
+      console.log('entryDateStr======', entry)
       const dayResult = resultByDate[entryDateStr] || null;
+      
 
       return {
         ...entry.toObject(),
@@ -975,6 +981,7 @@ const netPayMultiday = async (req, res) => {
         date: entryDateStr
       };
     });
+    console.log('processedEntries', processedEntries)
 const userRates = await getUserRates(agentUsers, time, req.body.fromAccountSummary, req.body.loggedInUser);
     if (processedEntries.length === 0) {
       return res.status(200).json({ message: "No entries found for given date range" });
