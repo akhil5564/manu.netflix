@@ -3,6 +3,7 @@ const Entry = require('./model/Entry');
 const bcrypt = require('bcryptjs');
 const RateMaster = require('./model/RateMaster');
 const Result = require('./model/ResultModel');
+const DailyLimitUsage = require('./model/DailyLimitUsage');
 const BlockTime = require('./model/BlockTime');
 
 const TicketLimit = require('./model/TicketLimit'); // create this model
@@ -1343,6 +1344,41 @@ const getTicketLimits = async () => {
     
   }
 };
+
+// Helper: get existing usage totals from DailyLimitUsage for provided keys
+const countByUsageF = async (date, keys) => {
+  try {
+    if (!Array.isArray(keys) || !date) {
+      throw new Error('Missing required fields');
+    }
+
+    const normalizeType = (rawType) => {
+      if (rawType.toUpperCase().includes('SUPER')) return 'SUPER';
+      const parts = rawType.split('-');
+      return parts.length > 1 ? parts[parts.length - 2].toUpperCase() : parts[0].toUpperCase();
+    };
+
+    // Reduce to unique types and fetch remaining per type
+    const types = [...new Set(keys.map((key) => normalizeType(key)))];
+    const docs = await DailyLimitUsage.find({ date, type: { $in: types } }).lean();
+
+    const map = {};
+    keys.forEach((key) => {
+      const type = normalizeType(key);
+      const hit = docs.find((d) => d.type === type);
+      if (hit && typeof hit.remaining === 'number') {
+        map[type] = { remaining: hit.remaining };
+      } else {
+        map[type] = { remaining: null };
+      }
+    });
+
+    return map;
+  } catch (err) {
+    console.error('❌ countByUsageF error:', err);
+    throw err;
+  }
+};
 // Helper function (NOT Express handler anymore)
 const countByNumberF = async (date, timeLabel, keys) => {
   try {
@@ -1368,13 +1404,23 @@ const countByNumberF = async (date, timeLabel, keys) => {
         number,
         type: { $regex: `^${type}$`, $options: "i" },
         timeLabel,
-        date,
       };
     });
 
-    // Run aggregation
+    // Build start/end of day range for Date-typed 'date' field
+    const start = new Date(`${date}T00:00:00.000Z`);
+    const end = new Date(`${date}T23:59:59.999Z`);
+
+    // Run aggregation with date range
     const results = await Entry.aggregate([
-      { $match: { $or: matchConditions } },
+      {
+        $match: {
+          $and: [
+            { date: { $gte: start, $lte: end } },
+            { $or: matchConditions },
+          ],
+        },
+      },
       {
         $group: {
           _id: { type: "$type", number: "$number" },
@@ -1492,35 +1538,35 @@ console.log('unblock', now < unblock)
       newTotalByNumberType[key] = (newTotalByNumberType[key] || 0) + (entry.count || 1);
     });
 
-    // 4️⃣ Fetch existing counts
+    // 4️⃣ Fetch remaining from DailyLimitUsage (per-day persisted remaining)
     const keys = Object.keys(newTotalByNumberType);
-    const existingCounts = await countByNumberF(targetDateStr, timeLabel, keys);
+    const remainingMap = await countByUsageF(targetDateStr, keys);
 
     // 5️⃣ Validate entries
-    const totalSoFar = { ...existingCounts };
     const validEntries= [];
     const exceededEntries= [];
 
     for (const entry of entries) {
       const count = entry.count || 1;
       const rawType = entry.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
-      const key = `${rawType}-${entry.number}`;
+      const key = rawType;
       const maxLimit = parseInt(allLimits[rawType] || '9999', 10);
-      const currentTotal = totalSoFar[key] || 0;
-      const allowedCount = maxLimit - currentTotal;
+      // If DailyLimitUsage has a remaining → use it; else fall back to maxLimit (no usage yet)
+      const remainingFromDb = remainingMap[rawType]?.remaining;
+      const allowedCount = typeof remainingFromDb === 'number'
+        ? remainingFromDb
+        : maxLimit;
 
       if (allowedCount <= 0) {
-        exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: currentTotal, added: 0 });
+        exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: maxLimit - allowedCount, added: 0 });
         continue;
       }
 
       if (count <= allowedCount) {
         validEntries.push(entry);
-        totalSoFar[key] = currentTotal + count;
       } else {
         validEntries.push({ ...entry, count: allowedCount });
-        totalSoFar[key] = currentTotal + allowedCount;
-        exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: currentTotal, added: allowedCount });
+        exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: maxLimit - allowedCount, added: allowedCount });
       }
     }
 
@@ -1534,7 +1580,34 @@ console.log('unblock', now < unblock)
       createdBy,
       toggleCount,);
     
-    // 6️⃣ Save valid entries
+    // 6️⃣ Enforce strict limit: if any item exceeds the limit, reject entire save
+    if (exceededEntries.length > 0) {
+      const detailsList = exceededEntries.map(e => {
+        const remaining = Math.max(0, (e.limit || 0) - (e.existing || 0));
+        return {
+          type: e.key,
+          limit: e.limit || 0,
+          remaining,
+          attempted: e.attempted,
+          willAdd: e.added || 0,
+        };
+      });
+
+      const humanLines = detailsList.map(d => `${d.type}: remaining ${d.remaining}, attempted ${d.attempted}`);
+      const humanMessage = [
+        'Daily limit reached for:',
+        ...humanLines,
+        '',
+        'Nothing was saved. Reduce the count and try again.'
+      ].join('\n');
+
+      return res.status(400).json({
+        message: humanMessage,
+        exceeded: detailsList
+      });
+    }
+
+    // 7️⃣ Save entries only when none exceed limits
     const savedBill = await addEntriesF({
       entries: validEntries,
       timeLabel,
@@ -1546,7 +1619,42 @@ console.log('unblock', now < unblock)
     });
     console.log('savedBill', savedBill)
 
-    return res.json({ billNo: savedBill.billNo, exceeded: exceededEntries });
+    // 8️⃣ Upsert DailyLimitUsage remaining per (date,type,number)
+    // We must decrement remaining by saved counts, initializing with TicketLimit on first write
+    const usageByType = {};
+    validEntries.forEach((e) => {
+      const rawType = e.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
+      usageByType[rawType] = (usageByType[rawType] || 0) + (e.count || 1);
+    });
+
+    const ops = Object.entries(usageByType).map(([t, used]) => {
+      const max = parseInt(allLimits[t] || '9999', 10);
+      return {
+        updateOne: {
+          filter: { date: targetDateStr, type: t },
+          update: [
+            {
+              $set: {
+                remaining: {
+                  $let: {
+                    vars: { curr: "$remaining" },
+                    in: {
+                      $max: [ 0, { $subtract: [ { $ifNull: ["$$curr", max] }, used ] } ]
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          upsert: true,
+        }
+      };
+    });
+    if (ops.length > 0) {
+      await DailyLimitUsage.bulkWrite(ops);
+    }
+
+    return res.json({ billNo: savedBill.billNo, exceeded: [] });
 
   } catch (err) {
     console.error('Error saving entries:', err);
