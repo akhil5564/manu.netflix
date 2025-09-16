@@ -1,10 +1,10 @@
-const mongoose = require('mongoose');
+import mongoose from "mongoose";
 
-const BlockTimeSchema = new mongoose.Schema({
-  drawLabel: { type: String, required: true, unique: true },
-  blockTime: { type: String, required: true }, // format: 'HH:mm'
-    unblockTime: { type: String, required: true },
-
+const blockTimeSchema = new mongoose.Schema({
+  draw: { type: String, required: true },
+  type: { type: String, enum: ["admin", "master", "sub"], required: true }, // added master & sub
+  blockTime: { type: String, required: true },   // "HH:MM"
+  unblockTime: { type: String, required: true }, // "HH:MM"
 });
 
-module.exports = mongoose.model('BlockTime', BlockTimeSchema);
+export default mongoose.model("BlockTime", blockTimeSchema);
