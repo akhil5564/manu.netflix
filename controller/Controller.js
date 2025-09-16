@@ -217,8 +217,7 @@ const updatePasswordController = async (req, res) => {
 
 
 
-
-const setBlockTime = async (req, res) => {
+export const setBlockTime = async (req, res) => {
   const { blocks } = req.body; // blocks = [{ draw, type, blockTime, unblockTime }]
 
   if (!Array.isArray(blocks)) {
@@ -229,30 +228,26 @@ const setBlockTime = async (req, res) => {
     const results = await Promise.all(
       blocks.map(({ draw, type, blockTime, unblockTime }) => {
         if (!draw || !type || !blockTime || !unblockTime) {
-          throw new Error("draw, type, blockTime, and unblockTime are all required.");
+          throw new Error("draw, type, blockTime, and unblockTime are all required");
         }
 
-        // Upsert by draw + type
         return BlockTime.findOneAndUpdate(
-          { drawLabel: draw, type }, // search by draw + type
-          { blockTime, unblockTime },
-          { upsert: true, new: true }
+          { drawLabel: draw, type },   // filter
+          { blockTime, unblockTime },  // update
+          { upsert: true, new: true }  // create if not exists
         );
       })
     );
 
     return res.status(200).json({
-      message: "Block and Unblock times saved for all types",
+      message: "Block times saved successfully",
       results,
     });
-  } catch (error) {
-    console.error("Error saving block time:", error);
-    return res.status(500).json({ message: error.message || "Server error" });
+  } catch (err) {
+    console.error("Error saving block time:", err);
+    return res.status(500).json({ message: err.message || "Server error" });
   }
 };
-
-
-
 
 const getNextBillNumber = async () => {
   const result = await BillCounter.findOneAndUpdate(
