@@ -215,49 +215,51 @@ const updatePasswordController = async (req, res) => {
   }
 };
 
+
+
+
+
+
 const setBlockTime = async (req, res) => {
   const { blocks } = req.body;
 
   if (!Array.isArray(blocks)) {
-    return res.status(400).json({ message: 'blocks must be an array' });
+    return res.status(400).json({ message: "blocks must be an array" });
   }
 
   try {
     const results = await Promise.all(
-      blocks.map(async ({ draw, type, blockTime, unblockTime }) => {
-        if (!draw || !type || !blockTime || !unblockTime) {
-          throw new Error('draw, type, blockTime, and unblockTime are all required.');
+      blocks.map(async ({ drawLabel, type, blockTime, unblockTime }) => {
+        if (!drawLabel || !type || !blockTime || !unblockTime) {
+          throw new Error(
+            "drawLabel, type, blockTime, and unblockTime are all required."
+          );
         }
 
-        // Find the existing BlockTime record for this draw
-        let record = await BlockTime.findOne({ drawLabel: draw });
-
-        if (!record) {
-          // If no record exists, create a new one with all types defaulted
-          record = new BlockTime({
-            drawLabel: draw,
-            admin: { blockTime: '00:00', unblockTime: '00:00' },
-            master: { blockTime: '00:00', unblockTime: '00:00' },
-            sub: { blockTime: '00:00', unblockTime: '00:00' },
-          });
+        // Validate HH:mm
+        const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+        if (!timeRegex.test(blockTime) || !timeRegex.test(unblockTime)) {
+          throw new Error("blockTime and unblockTime must be in HH:mm format.");
         }
 
-        // Update only the specified type
-        record[type] = { blockTime, unblockTime };
-
-        return record.save();
+        // Replace existing document if exists, otherwise insert new
+        await BlockTime.findOneAndReplace(
+          { drawLabel, type },       // search by drawLabel + type
+          { drawLabel, type, blockTime, unblockTime },
+          { upsert: true }           // insert if not exist
+        );
       })
     );
 
-    return res.status(200).json({
-      message: 'Block and Unblock times saved successfully',
-      results,
-    });
-  } catch (error) {
-    console.error('Error saving block time:', error);
-    return res.status(500).json({ message: error.message || 'Server error' });
+    res.status(200).json({ message: "Block times saved/updated successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: err.message || "Server error" });
   }
 };
+
+
+
 
 
 
