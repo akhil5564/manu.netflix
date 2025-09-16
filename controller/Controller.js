@@ -214,21 +214,22 @@ const updatePasswordController = async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 };
+
 const setBlockTime = async (req, res) => {
   const { blocks } = req.body;
 
   if (!Array.isArray(blocks)) {
-    return res.status(400).json({ message: 'blocks must be an array' });
+    return res.status(400).json({ message: "blocks must be an array" });
   }
 
   try {
     const results = await Promise.all(
       blocks.map(({ draw, blockTime, unblockTime }) => {
         if (!draw || !blockTime || !unblockTime) {
-          throw new Error('draw, blockTime, and unblockTime are all required.');
+          throw new Error("draw, blockTime, and unblockTime are all required.");
         }
         return BlockTime.findOneAndUpdate(
-          { drawLabel: draw },
+          { drawLabel: draw }, // search by draw name
           { blockTime, unblockTime },
           { upsert: true, new: true }
         );
@@ -236,14 +237,15 @@ const setBlockTime = async (req, res) => {
     );
 
     return res.status(200).json({
-      message: 'Block and Unblock times saved',
+      message: "Block and Unblock times saved",
       results,
     });
   } catch (error) {
-    console.error('Error saving block time:', error);
-    return res.status(500).json({ message: error.message || 'Server error' });
+    console.error("Error saving block time:", error);
+    return res.status(500).json({ message: error.message || "Server error" });
   }
 };
+
 
 
 
