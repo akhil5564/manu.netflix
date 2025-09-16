@@ -215,39 +215,52 @@ const updatePasswordController = async (req, res) => {
   }
 };
 
-
-
-export const setBlockTime = async (req, res) => {
-  const { blocks } = req.body; // blocks = [{ draw, type, blockTime, unblockTime }]
+const setBlockTime = async (req, res) => {
+  const { blocks } = req.body;
 
   if (!Array.isArray(blocks)) {
-    return res.status(400).json({ message: "blocks must be an array" });
+    return res.status(400).json({ message: 'blocks must be an array' });
   }
 
   try {
     const results = await Promise.all(
-      blocks.map(({ draw, type, blockTime, unblockTime }) => {
+      blocks.map(async ({ draw, type, blockTime, unblockTime }) => {
         if (!draw || !type || !blockTime || !unblockTime) {
-          throw new Error("draw, type, blockTime, and unblockTime are all required");
+          throw new Error('draw, type, blockTime, and unblockTime are all required.');
         }
 
-        return BlockTime.findOneAndUpdate(
-          { drawLabel: draw, type },   // filter
-          { blockTime, unblockTime },  // update
-          { upsert: true, new: true }  // create if not exists
-        );
+        // Find the existing BlockTime record for this draw
+        let record = await BlockTime.findOne({ drawLabel: draw });
+
+        if (!record) {
+          // If no record exists, create a new one with all types defaulted
+          record = new BlockTime({
+            drawLabel: draw,
+            admin: { blockTime: '00:00', unblockTime: '00:00' },
+            master: { blockTime: '00:00', unblockTime: '00:00' },
+            sub: { blockTime: '00:00', unblockTime: '00:00' },
+          });
+        }
+
+        // Update only the specified type
+        record[type] = { blockTime, unblockTime };
+
+        return record.save();
       })
     );
 
     return res.status(200).json({
-      message: "Block times saved successfully",
+      message: 'Block and Unblock times saved successfully',
       results,
     });
-  } catch (err) {
-    console.error("Error saving block time:", err);
-    return res.status(500).json({ message: err.message || "Server error" });
+  } catch (error) {
+    console.error('Error saving block time:', error);
+    return res.status(500).json({ message: error.message || 'Server error' });
   }
 };
+
+
+
 
 const getNextBillNumber = async () => {
   const result = await BillCounter.findOneAndUpdate(
