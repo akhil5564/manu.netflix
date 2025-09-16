@@ -1,13 +1,12 @@
-// models/BlockTime.js or BlockTime.ts
-import mongoose from "mongoose";
+const mongoose = require('mongoose');
 
 const blockTimeSchema = new mongoose.Schema({
-  drawLabel: { type: String, required: true }, // same as draw in frontend
-  type: { type: String, enum: ["admin", "master", "sub"], required: true },
-  blockTime: { type: String, required: true },    // "HH:MM"
-  unblockTime: { type: String, required: true },  // "HH:MM"
+  drawLabel: { type: String, required: true },
+  type: { type: String, required: true },
+  blockTime: { type: String, required: true },
+  unblockTime: { type: String, required: true }
 });
 
-const BlockTime = mongoose.model("BlockTime", blockTimeSchema);
+// **No unique index** needed if duplicates are not a problem
 
-export default BlockTime;
+module.exports = mongoose.model('BlockTime', blockTimeSchema);
