@@ -215,8 +215,11 @@ const updatePasswordController = async (req, res) => {
   }
 };
 
+
+
+
 const setBlockTime = async (req, res) => {
-  const { blocks } = req.body;
+  const { blocks } = req.body; // blocks = [{ draw, type, blockTime, unblockTime }]
 
   if (!Array.isArray(blocks)) {
     return res.status(400).json({ message: "blocks must be an array" });
@@ -224,12 +227,14 @@ const setBlockTime = async (req, res) => {
 
   try {
     const results = await Promise.all(
-      blocks.map(({ draw, blockTime, unblockTime }) => {
-        if (!draw || !blockTime || !unblockTime) {
-          throw new Error("draw, blockTime, and unblockTime are all required.");
+      blocks.map(({ draw, type, blockTime, unblockTime }) => {
+        if (!draw || !type || !blockTime || !unblockTime) {
+          throw new Error("draw, type, blockTime, and unblockTime are all required.");
         }
+
+        // Upsert by draw + type
         return BlockTime.findOneAndUpdate(
-          { drawLabel: draw }, // search by draw name
+          { drawLabel: draw, type }, // search by draw + type
           { blockTime, unblockTime },
           { upsert: true, new: true }
         );
@@ -237,7 +242,7 @@ const setBlockTime = async (req, res) => {
     );
 
     return res.status(200).json({
-      message: "Block and Unblock times saved",
+      message: "Block and Unblock times saved for all types",
       results,
     });
   } catch (error) {
