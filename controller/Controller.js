@@ -9,6 +9,59 @@ const BlockTime = require('./model/BlockTime');
 const TicketLimit = require('./model/TicketLimit'); // create this model
 const BillCounter = require('./model/BillCounter');
 const User = require('./model/MainUser'); // adjust the path to where your MainUser.js is
+const BlockDate = require("./model/BlockDate");
+
+
+
+
+
+const getBlockedDates = async (req, res) => {
+  try {
+    const dates = await BlockDate.find().sort({ date: -1 });
+    res.json(dates);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching blocked dates" });
+  }
+};
+
+// ✅ Add new block date
+const addBlockDate = async (req, res) => {
+  try {
+    const { ticket, date } = req.body;
+
+    if (!ticket || !date) {
+      return res.status(400).json({ message: "Ticket and Date are required" });
+    }
+
+    // Prevent duplicate
+    const exists = await BlockDate.findOne({ ticket, date });
+    if (exists) {
+      return res.status(400).json({ message: "Already blocked" });
+    }
+
+    const blockDate = new BlockDate({ ticket, date });
+    await blockDate.save();
+    res.status(201).json(blockDate);
+  } catch (err) {
+    res.status(500).json({ message: "Error blocking date" });
+  }
+};
+
+// ✅ Delete block date
+const deleteBlockDate = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleted = await BlockDate.findByIdAndDelete(id);
+
+    if (!deleted) {
+      return res.status(404).json({ message: "Not found" });
+    }
+
+    res.json({ message: "Deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ message: "Error deleting block date" });
+  }
+};
 
 
 
@@ -1872,5 +1925,5 @@ module.exports = {
   getUserRates,
   getWinningReport,
   saveValidEntries,
-  getSalesReport
+  getSalesReport,getBlockedDates, addBlockDate, deleteBlockDate
 };
