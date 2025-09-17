@@ -1,45 +1,51 @@
 const express = require('express');
 const dotenv = require('dotenv');
 dotenv.config();
+
 const connectDB = require('./database/model/ConnectToDb');
-const { createUser,addEntries,getAllUsers,saveTicketLimit,saveRateMaster,saveResult,getResult,deleteUser, loginUser,getNextBillNumber,getEntries,invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster,getBlockTime,setBlockTime,countByNumber, getLatestTicketLimit ,toggleLoginBlock,toggleSalesBlock,updatePasswordController, netPayMultiday, getWinningReport, saveValidEntries, getSalesReport
-// ✅ Add this
+const Controller = require('./controller/Controller');
 
-} = require('./controller/Controller');
 const app = express();
-
 connectDB();
 app.use(express.json());
 
 
-app.get('/users', getAllUsers); // 👈 this is the GET route
-app.post('/newuser', createUser); // Direct route
-app.post('/addEntries', addEntries);
-app.post('/ticket-limit', saveTicketLimit);
-app.post('/ratemaster', saveRateMaster);
-app.post('/addResult', saveResult);
-app.get('/getResult', getResult);
-app.get('/entries', getEntries); // 👈 Add this
-app.post('/login', loginUser);
-app.get('/next-bill', getNextBillNumber); // ✅ Add this
-app.patch('/invalidateEntry/:id', invalidateEntry);
-app.delete('/deleteEntryById/:id', deleteEntryById);
-app.delete('/deleteEntriesByBillNo/:billNo', deleteEntriesByBillNo);
-app.put('/updateEntryCount/:id', updateEntryCount); // if added
-app.get('/report/count', getCountReport); // ✅ Set route
-app.get('/rateMaster', getRateMaster);
-app.post('/setBlockTime', setBlockTime);
-app.get('/getBlockTime/:drawLabel', getBlockTime);
-app.post('/countByNumber', countByNumber);
-app.get('/getticketLimit', getLatestTicketLimit);
-app.patch("/user/blockLogin/:id", toggleLoginBlock);
-app.patch('/blockSales/:id', toggleSalesBlock); // ✅ New route
-app.put('/users/:username', updatePasswordController);
-app.delete('/users/:id', deleteUser);
-app.post('/report/netpay-multiday', netPayMultiday);
-app.post('/report/winningReport', getWinningReport);
-app.get('/report/salesReport', getSalesReport);
-app.post('/entries/saveValidated', saveValidEntries);
+
+
+// Routes
+app.get("/blockedDates", Controller.getBlockedDates);
+app.post("/blockDate", Controller.addBlockDate);
+app.delete("/blockDate/:id", Controller.deleteBlockDate);
+
+
+app.get('/users', Controller.getAllUsers);
+app.post('/newuser', Controller.createUser);
+app.post('/addEntries', Controller.addEntries);
+app.post('/ticket-limit', Controller.saveTicketLimit);
+app.post('/ratemaster', Controller.saveRateMaster);
+app.post('/addResult', Controller.saveResult);
+app.get('/getResult', Controller.getResult);
+app.get('/entries', Controller.getEntries);
+app.post('/login', Controller.loginUser);
+app.get('/next-bill', Controller.getNextBillNumber);
+app.patch('/invalidateEntry/:id', Controller.invalidateEntry);
+app.delete('/deleteEntryById/:id', Controller.deleteEntryById);
+app.delete('/deleteEntriesByBillNo/:billNo', Controller.deleteEntriesByBillNo);
+app.put('/updateEntryCount/:id', Controller.updateEntryCount);
+app.get('/report/count', Controller.getCountReport);
+app.get('/rateMaster', Controller.getRateMaster);
+app.post('/setBlockTime', Controller.setBlockTime);
+app.get('/getBlockTime/:drawLabel', Controller.getBlockTime);
+app.post('/countByNumber', Controller.countByNumber);
+app.get('/getticketLimit', Controller.getLatestTicketLimit);
+app.patch("/user/blockLogin/:id", Controller.toggleLoginBlock);
+app.patch('/blockSales/:id', Controller.toggleSalesBlock);
+app.put('/users/:username', Controller.updatePasswordController);
+app.delete('/users/:id', Controller.deleteUser);
+app.post('/report/netpay-multiday', Controller.netPayMultiday);
+app.post('/report/winningReport', Controller.getWinningReport);
+app.get('/report/salesReport', Controller.getSalesReport);
+app.post('/entries/saveValidated', Controller.saveValidEntries);
 
 const port = process.env.PORT || 5000;
 app.listen(port, () => {
