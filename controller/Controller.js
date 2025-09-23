@@ -979,7 +979,16 @@ const calculateWinAmount = (entry, results) => {
   };
 
 // Pseudocode based on your frontend logic
+const drawLabelMap = {
+  "LSK 3 PM": "KERALA 3 PM",
+  "DEAR 1 PM": "DEAR 1 PM",
+  "DEAR 6 PM": "DEAR 6 PM",
+  "DEAR 8 PM": "DEAR 8 PM"
+};
 
+function normalizeDrawLabel(label) {
+  return drawLabelMap[label] || label;
+}
 const netPayMultiday = async (req, res) => {
   const { fromDate, toDate, time, agent } = req.body;
 console.log('req.body=>>>>>>>>>>>>>>>>', req.body);
@@ -1008,52 +1017,81 @@ console.log('req.body=>>>>>>>>>>>>>>>>', req.body);
     // 3️⃣ Date range query
     const start = new Date(fromDate + "T00:00:00.000Z");
     const end = new Date(toDate + "T23:59:59.999Z");
+      let entryQuery= {
+        createdBy: { $in: agentUsers },
+        date: { $gte: start, $lte: end }
+      }
+      if(time!='All'){
+      entryQuery={
+        createdBy: { $in: agentUsers },  
+        timeLabel: time,
+        date: { $gte: start, $lte: end }
+      }
+      }
 
     // 4️⃣ Fetch all entries in one go (instead of looping per day)
-    const entries = await Entry.find({
-      createdBy: { $in: agentUsers },
-      timeLabel: time,
-      date: { $gte: start, $lte: end }
-    });
+    const entries = await Entry.find(entryQuery);
+    console.log('entries==========qq', entries)
     // 5️⃣ Fetch all results for the same range
     // Remove space before the last 2 characters (PM/AM)
     let filterTime = time.replace(/\s+(PM|AM)$/gi, '$1');
     console.log('Original time:', time);
     console.log('Filtered time:', filterTime);
-    
-    const resultQuery = {
-      time: filterTime,
+   let resultQuery = {
       date: { $gte: fromDate, $lte: toDate }
     };
+    if(time!='All'){ 
+      resultQuery = {
+      time: filterTime,
+      date: { $gte: fromDate, $lte: toDate }
+    };}
     const results = await Result.find(resultQuery).lean();
     // const resultss = await Result.find({}).limit(5);
-    console.log('resultQuery=>>>>>>>>>>>>>>>>', resultQuery);
+    // console.log('resultQuery=>>>>>>>>>>>>>>>>', resultQuery);
     // console.log('results=>>>>>>>>>>>>>>>>', results);
     // console.log('resultss=>>>>>>>>>>>>>>>>', resultss);
     // Make result lookup by date
     const resultByDate = {};
     results.forEach(r => {
       const dateStr = new Date(r.date).toISOString().slice(0, 10); // "YYYY-MM-DD"
-      console.log('dateStr', dateStr)
+      // console.log('dateStr', dateStr)
       resultByDate[dateStr] = r;
     });
 
+
+const userRates = await getUserRates(agentUsers, time, req.body.fromAccountSummary, req.body.loggedInUser);
+    console.log('entry===========1', userRates)
     // 6️⃣ Process entries with result of that day
     const processedEntries = entries.map(entry => {
       const entryDateStr = entry.date.toISOString().slice(0, 10);
-      console.log('entryDateStr======', entryDateStr)
-      console.log('entryDateStr======', entry)
       const dayResult = resultByDate[entryDateStr] || null;
-      
-
+    
+      const userRateMap = userRates[entry.createdBy] || {};
+    
+      // ✅ normalize the timeLabel to match RateMaster
+      const normalizedLabel = normalizeDrawLabel(entry.timeLabel);
+      console.log('normalizedLabel', normalizedLabel)
+    
+      const drawRateMap = time === "All"
+        ? (userRateMap[normalizedLabel] || {})
+        : (userRateMap[time] || {});
+    
+      const betType = extractBetType(entry.type);
+      console.log('betType', betType)
+      console.log('drawRateMap', drawRateMap)
+      const rate = drawRateMap[betType] ?? 10;
+      console.log('rate', rate)
+    
       return {
         ...entry.toObject(),
         winAmount: calculateWinAmount(entry, dayResult),
+        appliedRate: rate,
+        calculatedAmount: rate * (Number(entry.count) || 0),
         date: entryDateStr
       };
     });
+    
     console.log('processedEntries', processedEntries)
-const userRates = await getUserRates(agentUsers, time, req.body.fromAccountSummary, req.body.loggedInUser);
     if (processedEntries.length === 0) {
       return res.status(200).json({ message: "No entries found for given date range" });
     }
@@ -1072,47 +1110,105 @@ const userRates = await getUserRates(agentUsers, time, req.body.fromAccountSumma
     res.status(500).json({ error: err.message });
   }
 };
+// async function getUserRates(usernames, time, fromAccountSummary, loggedInUser) {
+//   const encodedDraw = time;
+// let ratee = await RateMaster.find({})
+//   console.log('ratee=======', ratee)
+//   if (fromAccountSummary) {
+//     // Only fetch loggedInUser rate once
+//     const adminRateDoc = await RateMaster.findOne({
+//       user: loggedInUser,
+//       draw: encodedDraw
+//     });
+
+//     const adminRates = {};
+//     (adminRateDoc?.rates || []).forEach(r => {
+//       adminRates[r.label] = r.rate;
+//     });
+
+//     // Apply same rates to all users
+//     const ratesMap = {};
+//     usernames.forEach(u => (ratesMap[u] = adminRates));
+//     return ratesMap;
+//   } else {
+//     // Fetch each user’s rate
+//     const rateDocs = await RateMaster.find({
+//       user: { $in: usernames },
+//       draw: encodedDraw
+//     });
+
+//     const ratesMap = {};
+//     rateDocs.forEach(doc => {
+//       const map = {};
+//       doc.rates.forEach(r => (map[r.label] = r.rate));
+//       ratesMap[doc.user] = map;
+//     });
+//     return ratesMap;
+//   }
+// }
 async function getUserRates(usernames, time, fromAccountSummary, loggedInUser) {
-  const encodedDraw = time;
+  // CASE 1: Specific draw
+  if (time !== "All") {
+    const encodedDraw = time;
 
-  if (fromAccountSummary) {
-    // Only fetch loggedInUser rate once
-    const adminRateDoc = await RateMaster.findOne({
-      user: loggedInUser,
-      draw: encodedDraw
-    });
+    if (fromAccountSummary) {
+      const adminRateDoc = await RateMaster.findOne({
+        user: loggedInUser,
+        draw: encodedDraw
+      });
 
-    const adminRates = {};
-    (adminRateDoc?.rates || []).forEach(r => {
-      adminRates[r.label] = r.rate;
-    });
+      const adminRates = {};
+      (adminRateDoc?.rates || []).forEach(r => {
+        adminRates[r.label] = r.rate;
+      });
 
-    // Apply same rates to all users
-    const ratesMap = {};
-    usernames.forEach(u => (ratesMap[u] = adminRates));
-    return ratesMap;
-  } else {
-    // Fetch each user’s rate
-    const rateDocs = await RateMaster.find({
-      user: { $in: usernames },
-      draw: encodedDraw
-    });
+      // Apply admin rates to all users
+      const ratesMap = {};
+      usernames.forEach(u => (ratesMap[u] = { [encodedDraw]: adminRates }));
+      return ratesMap;
+    } else {
+      const rateDocs = await RateMaster.find({
+        user: { $in: usernames },
+        draw: encodedDraw
+      });
 
-    const ratesMap = {};
-    rateDocs.forEach(doc => {
-      const map = {};
-      doc.rates.forEach(r => (map[r.label] = r.rate));
-      ratesMap[doc.user] = map;
-    });
-    return ratesMap;
+      const ratesMap = {};
+      rateDocs.forEach(doc => {
+        const map = {};
+        doc.rates.forEach(r => (map[r.label] = r.rate));
+        if (!ratesMap[doc.user]) ratesMap[doc.user] = {};
+        ratesMap[doc.user][doc.draw] = map;
+      });
+      return ratesMap;
+    }
   }
+
+  // CASE 2: All draws
+  const rateDocs = await RateMaster.find({
+    user: { $in: usernames }
+  });
+
+  const ratesMap = {};
+  rateDocs.forEach(doc => {
+    const map = {};
+    doc.rates.forEach(r => (map[r.label] = r.rate));
+
+    if (!ratesMap[doc.user]) ratesMap[doc.user] = {};
+    ratesMap[doc.user][doc.draw] = map;
+  });
+
+  return ratesMap;
 }
+
 // =======================
 // 📌 Winning Report (multi-day)
 // =======================
 
 
 // ---- helper functions for winning report ----
+
+
+
 function isDoubleNumber(numStr) {
   return new Set(numStr.split("")).size === 2;
 }
