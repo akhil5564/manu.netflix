@@ -13,9 +13,9 @@ app.use(express.json());
 
 
 // Routes
-app.get("/blockedDates", Controller.getBlockedDates);
-app.post("/blockDate", Controller.addBlockDate);
-app.delete("/blockDate/:id", Controller.deleteBlockDate);
+app.get("/get-blocked-dates", Controller.getBlockedDates);
+app.post("/add-blockdate", Controller.addBlockDate);
+app.delete("/delete-blockdate/:id", Controller.deleteBlockDate);
 
 
 app.get('/users', Controller.getAllUsers);

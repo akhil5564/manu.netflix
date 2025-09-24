@@ -15,6 +15,14 @@ const BlockDate = require("./model/BlockDate");
 
 
 
+// Static ticket codes to use when blocking for "all"
+const STATIC_TICKETS = [
+  'LSK3',
+  'DEAR1',
+  'DEAR6',
+  'DEAR8'
+];
+
 const getBlockedDates = async (req, res) => {
   try {
     const dates = await BlockDate.find().sort({ date: -1 });
@@ -28,22 +36,44 @@ const getBlockedDates = async (req, res) => {
 const addBlockDate = async (req, res) => {
   try {
     const { ticket, date } = req.body;
+    console.log('exists1=============', req.body)
 
     if (!ticket || !date) {
       return res.status(400).json({ message: "Ticket and Date are required" });
     }
+    // If ticket is 'all', block the date for all tickets/draws
+    const isAll = typeof ticket === 'string' && ticket.trim().toLowerCase() === 'all';
+    if (isAll) {
+      const allTickets = STATIC_TICKETS;
 
-    // Prevent duplicate
+      // Check which are already blocked for the date
+      const existing = await BlockDate.find({ date, ticket: { $in: allTickets } }, { ticket: 1 }).lean();
+      const alreadyBlockedSet = new Set((existing || []).map(d => d.ticket));
+      const toInsert = allTickets
+        .filter(t => !alreadyBlockedSet.has(t))
+        .map(t => ({ ticket: t, date }));
+
+      if (toInsert.length === 0) {
+        return res.status(201).json({ status: 2, message: 'Already blocked for all tickets', blockedCount: 0 });
+      }
+
+      const result = await BlockDate.insertMany(toInsert, { ordered: false });
+      return res.status(201).json({ status: 1, message: 'Blocked successfully for all tickets', blockedCount: result.length });
+    }
+
+    // Single ticket flow: Prevent duplicate
+    const dates = await BlockDate.find({});
+    console.log('exists1=============', dates)
     const exists = await BlockDate.findOne({ ticket, date });
     if (exists) {
-      return res.status(400).json({ message: "Already blocked" });
+      return res.status(201).json({status:2, message: "Already blocked" });
     }
 
     const blockDate = new BlockDate({ ticket, date });
     await blockDate.save();
-    res.status(201).json(blockDate);
+    res.status(201).json({status:1, message: "Blocked successfully", blockDate});
   } catch (err) {
-    res.status(500).json({ message: "Error blocking date" });
+    res.status(500).json({ status:0, message: "Error blocking date" });
   }
 };
 
@@ -1483,11 +1513,38 @@ const getWinningReport = async (req, res) => {
   }
 };
 
-
+const normalizeDrawLabelLimit = (label) => {
+  if (!label || typeof label !== 'string') return '';
+  return label
+    .toUpperCase()
+    .replace(/\b(AM|PM)\b/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+};
 
 async function getBlockTimeF(drawLabel) {
   if (!drawLabel) return null;
-  const record = await BlockTime.findOne({ drawLabel });
+  const records = await BlockTime.find({});
+  console.log('records=============', records)
+  console.log('drawLabel=============', drawLabel)
+  // Normalize incoming label to improve matching (e.g., "LSK 3 PM" -> "LSK3")
+
+
+  const originalLabel = drawLabel;
+  const normalizedLabel = normalizeDrawLabelLimit(drawLabel);
+
+  let record = await BlockTime.findOne({ drawLabel: originalLabel });
+
+  if (!record) {
+    // Try normalized (space/AM/PM removed, uppercased)
+    record = await BlockTime.findOne({ drawLabel: normalizedLabel });
+  }
+
+  if (!record) {
+    // Fallback to case-insensitive exact match on normalized form
+    const escaped = normalizedLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    record = await BlockTime.findOne({ drawLabel: { $regex: `^${escaped}$`, $options: 'i' } });
+  }
   
   if (!record) return null;
 
@@ -1652,32 +1709,43 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
  const saveValidEntries = async (req, res) => {
   try {
     const { entries, timeLabel, timeCode, selectedAgent, createdBy, toggleCount } = req.body;
-    console.log('req.body;', req.body)
+    // console.log('req.body;', req.body)
     if (!entries || entries.length === 0) {
       return res.status(400).json({ message: 'No entries provided' });
     }
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+    const normalizedLabel = normalizeDrawLabelLimit(timeLabel);
+    // console.log('normalizedLabel==============', normalizedLabel);
+    // console.log('todayStr==============', todayStr)
+    // const datesss = await BlockDate.find({});
+    // console.log('exists1=============', datesss)
+    const blockedDates = await BlockDate.findOne({date: todayStr , ticket:normalizedLabel});
+    // console.log('blockedDates==============', blockedDates)
+    
+    if (blockedDates) {
+      return res.status(400).json({ message: 'Today is blocked for this ticket ' });
+    }
     // 1️⃣ Get block/unblock time
     const blockTimeData = await getBlockTimeF(timeLabel);
-    console.log('blockTimeData===========', blockTimeData);
     if (!blockTimeData) {
       return res.status(400).json({ message: `No block time configuration found for draw: ${timeLabel}` });
     }
     const { blockTime, unblockTime } = blockTimeData;
     if (!blockTime || !unblockTime) return res.status(400).json({ message: 'Block or unblock time missing' });
 
-    const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
+    
     // const block = new Date(`${todayStr}T${blockTime}:00`);
     // const unblock = new Date(`${todayStr}T${unblockTime}:00`);
     const [bh, bm] = blockTime.split(':').map(Number);
 const [uh, um] = unblockTime.split(':').map(Number);
 
 const block = new Date(now.getFullYear(), now.getMonth(), now.getDate(), bh, bm);
-console.log('block', block)
+// console.log('block', block)
 const unblock = new Date(now.getFullYear(), now.getMonth(), now.getDate(), uh, um);
-console.log('unblock', unblock)
-console.log('unblock', now >= block );
-console.log('unblock', now < unblock)
+// console.log('unblock', unblock)
+// console.log('unblock', now >= block );
+// console.log('unblock', now < unblock)
 
     if (now >= block && now < unblock) {
       return res.status(403).json({ message: 'Entry time is blocked for this draw' });
