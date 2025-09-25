@@ -197,6 +197,28 @@ const getAllBlockTimes = async (req, res) => {
     return res.status(500).json({ message: 'Error retrieving block times' });
   }
 };
+// ✅ Get block time for a draw and role (admin/master/sub)
+const getBlockTimeByType = async (req, res) => {
+  try {
+    const drawLabel = req.params.drawLabel?.trim();
+    const type = req.params.type?.trim();
+
+    if (!drawLabel || !type) {
+      return res.status(400).json({ message: 'Missing drawLabel or type in request params' });
+    }
+
+    const record = await BlockTime.findOne({ drawLabel, type });
+    console.log('Record:==============', record);
+    if (!record) {
+      return res.status(404).json({ message: `No block time found for ${drawLabel} (${type})` });
+    }
+
+    return res.status(200).json(record);
+  } catch (error) {
+    console.error(`Error retrieving block time for draw/type:`, error);
+    return res.status(500).json({ message: 'Server error while fetching block time' });
+  }
+};
 // ✅ Save or update block time
 
 
@@ -1044,37 +1066,64 @@ console.log('req.body=>>>>>>>>>>>>>>>>', req.body);
       ? [agent, ...getAllDescendants(agent, users)]
       : users.map(u => u.username);
 
-    // 3️⃣ Date range query
+    // 3️⃣ Date range + time filter (supports string or array)
     const start = new Date(fromDate + "T00:00:00.000Z");
     const end = new Date(toDate + "T23:59:59.999Z");
-      let entryQuery= {
-        createdBy: { $in: agentUsers },
-        date: { $gte: start, $lte: end }
+
+    const isArrayTime = Array.isArray(time);
+    const isAllTime = !isArrayTime && (time === 'All' || time === 'ALL');
+
+    let entryQuery = {
+      createdBy: { $in: agentUsers },
+      date: { $gte: start, $lte: end }
+    };
+
+    if (!isAllTime) {
+      if (isArrayTime) {
+        if (time.length > 0) {
+          entryQuery = {
+            ...entryQuery,
+            timeLabel: { $in: time }
+          };
+        }
+      } else if (typeof time === 'string' && time.trim().length > 0) {
+        entryQuery = {
+          ...entryQuery,
+          timeLabel: time
+        };
       }
-      if(time!='All'){
-      entryQuery={
-        createdBy: { $in: agentUsers },  
-        timeLabel: time,
-        date: { $gte: start, $lte: end }
-      }
-      }
+    }
 
     // 4️⃣ Fetch all entries in one go (instead of looping per day)
     const entries = await Entry.find(entryQuery);
-    console.log('entries==========qq', entries)
-    // 5️⃣ Fetch all results for the same range
+    // console.log('entries==========qq', entries)
+    // 5️⃣ Fetch all results for the same range (support string or array)
     // Remove space before the last 2 characters (PM/AM)
-    let filterTime = time.replace(/\s+(PM|AM)$/gi, '$1');
-    console.log('Original time:', time);
-    console.log('Filtered time:', filterTime);
-   let resultQuery = {
+    const stripSpaceBeforeMeridiem = (label) => label.replace(/\s+(PM|AM)$/gi, '$1');
+
+    let resultQuery = {
       date: { $gte: fromDate, $lte: toDate }
     };
-    if(time!='All'){ 
-      resultQuery = {
-      time: filterTime,
-      date: { $gte: fromDate, $lte: toDate }
-    };}
+
+    if (!isAllTime) {
+      if (isArrayTime) {
+        const times = (time || []).map(t => stripSpaceBeforeMeridiem(String(t)));
+        if (times.length > 0) {
+          resultQuery = {
+            time: { $in: times },
+            date: { $gte: fromDate, $lte: toDate }
+          };
+        }
+      } else if (typeof time === 'string' && time.trim().length > 0) {
+        const filterTime = stripSpaceBeforeMeridiem(time);
+        console.log('Original time:', time);
+        console.log('Filtered time:', filterTime);
+        resultQuery = {
+          time: filterTime,
+          date: { $gte: fromDate, $lte: toDate }
+        };
+      }
+    }
     const results = await Result.find(resultQuery).lean();
     // const resultss = await Result.find({}).limit(5);
     // console.log('resultQuery=>>>>>>>>>>>>>>>>', resultQuery);
@@ -1089,7 +1138,12 @@ console.log('req.body=>>>>>>>>>>>>>>>>', req.body);
     });
 
 
-const userRates = await getUserRates(agentUsers, time, req.body.fromAccountSummary, req.body.loggedInUser);
+const userRates = await getUserRates(
+  agentUsers,
+  (isArrayTime ? 'All' : time),
+  req.body.fromAccountSummary,
+  req.body.loggedInUser
+);
     console.log('entry===========1', userRates)
     // 6️⃣ Process entries with result of that day
     const processedEntries = entries.map(entry => {
@@ -1102,7 +1156,7 @@ const userRates = await getUserRates(agentUsers, time, req.body.fromAccountSumma
       const normalizedLabel = normalizeDrawLabel(entry.timeLabel);
       console.log('normalizedLabel', normalizedLabel)
     
-      const drawRateMap = time === "All"
+      const drawRateMap = (isAllTime || isArrayTime)
         ? (userRateMap[normalizedLabel] || {})
         : (userRateMap[time] || {});
     
@@ -1522,32 +1576,34 @@ const normalizeDrawLabelLimit = (label) => {
     .trim();
 };
 
-async function getBlockTimeF(drawLabel) {
-  if (!drawLabel) return null;
+async function getBlockTimeF(drawLabel, loggedInUserType) {
+  if (!drawLabel || !loggedInUserType) return null;
   const records = await BlockTime.find({});
-  console.log('records=============', records)
-  console.log('drawLabel=============', drawLabel)
+  // console.log('records=============', records)
+  // console.log('drawLabel=============', drawLabel)
+  console.log('loggedInUserType=============', loggedInUserType)
   // Normalize incoming label to improve matching (e.g., "LSK 3 PM" -> "LSK3")
 
 
   const originalLabel = drawLabel;
   const normalizedLabel = normalizeDrawLabelLimit(drawLabel);
 
-  let record = await BlockTime.findOne({ drawLabel: originalLabel });
+  let record = await BlockTime.findOne({ drawLabel: originalLabel, type: loggedInUserType });
+ 
 
   if (!record) {
     // Try normalized (space/AM/PM removed, uppercased)
-    record = await BlockTime.findOne({ drawLabel: normalizedLabel });
+    record = await BlockTime.findOne({ drawLabel: normalizedLabel, type: loggedInUserType });
   }
 
   if (!record) {
     // Fallback to case-insensitive exact match on normalized form
     const escaped = normalizedLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    record = await BlockTime.findOne({ drawLabel: { $regex: `^${escaped}$`, $options: 'i' } });
+    record = await BlockTime.findOne({ drawLabel: { $regex: `^${escaped}$`, $options: 'i' }, type: loggedInUserType });
   }
   
   if (!record) return null;
-
+  console.log('record=============', record)
   return {
     blockTime: record.blockTime,
     unblockTime: record.unblockTime
@@ -1708,7 +1764,7 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
 
  const saveValidEntries = async (req, res) => {
   try {
-    const { entries, timeLabel, timeCode, selectedAgent, createdBy, toggleCount } = req.body;
+    const { entries, timeLabel, timeCode, selectedAgent, createdBy, toggleCount, loggedInUserType } = req.body;
     // console.log('req.body;', req.body)
     if (!entries || entries.length === 0) {
       return res.status(400).json({ message: 'No entries provided' });
@@ -1727,7 +1783,7 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
       return res.status(400).json({ message: 'Today is blocked for this ticket ' });
     }
     // 1️⃣ Get block/unblock time
-    const blockTimeData = await getBlockTimeF(timeLabel);
+    const blockTimeData = await getBlockTimeF(timeLabel, loggedInUserType);
     if (!blockTimeData) {
       return res.status(400).json({ message: `No block time configuration found for draw: ${timeLabel}` });
     }
@@ -2079,6 +2135,7 @@ module.exports = {
   getRateMaster,
   setBlockTime,
   getBlockTime,
+  getBlockTimeByType,
   deleteUser,
   countByNumber,
   getLatestTicketLimit,
@@ -2089,5 +2146,6 @@ module.exports = {
   getUserRates,
   getWinningReport,
   saveValidEntries,
-  getSalesReport,getBlockedDates, addBlockDate, deleteBlockDate
+  getSalesReport,getBlockedDates, addBlockDate, deleteBlockDate,
+  getAllBlockTimes
 };

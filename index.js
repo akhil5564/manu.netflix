@@ -36,6 +36,8 @@ app.get('/report/count', Controller.getCountReport);
 app.get('/rateMaster', Controller.getRateMaster);
 app.post('/setBlockTime', Controller.setBlockTime);
 app.get('/getBlockTime/:drawLabel', Controller.getBlockTime);
+app.get('/blockTime/:drawLabel/:type', Controller.getBlockTimeByType);
+app.get('/blockTimes', Controller.getAllBlockTimes);
 app.post('/countByNumber', Controller.countByNumber);
 app.get('/getticketLimit', Controller.getLatestTicketLimit);
 app.patch("/user/blockLogin/:id", Controller.toggleLoginBlock);
