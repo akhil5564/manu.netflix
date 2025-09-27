@@ -19,6 +19,7 @@ app.delete("/delete-blockdate/:id", Controller.deleteBlockDate);
 
 
 app.get('/users', Controller.getAllUsers);
+app.post('/getusersByid', Controller.getusersByid);
 app.post('/newuser', Controller.createUser);
 app.post('/addEntries', Controller.addEntries);
 app.post('/ticket-limit', Controller.saveTicketLimit);
@@ -43,6 +44,7 @@ app.get('/getticketLimit', Controller.getLatestTicketLimit);
 app.patch("/user/blockLogin/:id", Controller.toggleLoginBlock);
 app.patch('/blockSales/:id', Controller.toggleSalesBlock);
 app.put('/users/:username', Controller.updatePasswordController);
+app.put('/users/update/:id', Controller.updateUser);
 app.delete('/users/:id', Controller.deleteUser);
 app.post('/report/netpay-multiday', Controller.netPayMultiday);
 app.post('/report/winningReport', Controller.getWinningReport);

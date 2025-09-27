@@ -23,6 +23,24 @@ const STATIC_TICKETS = [
   'DEAR8'
 ];
 
+// Function to parse and normalize time values
+const parseTimeValue = (time) => {
+  if (!time || time === "ALL") {
+    return null;
+  }
+  
+  // Normalize different time formats to standard format
+  if (time === 'DEAR 1PM' || time === 'DEAR 1 PM' || time === 'DEAR1PM') {
+    return 'DEAR 1PM';
+  } else if (time === 'DEAR 3PM' || time === 'DEAR 3 PM' || time === 'DEAR3PM') {
+    return 'DEAR 3PM';
+  } else if (time === 'DEAR 6PM' || time === 'DEAR 6 PM' || time === 'DEAR6PM') {
+    return 'DEAR 6PM';
+  } else {
+    return 'DEAR 8PM'; // Default fallback
+  }
+};
+
 const getBlockedDates = async (req, res) => {
   try {
     const dates = await BlockDate.find().sort({ date: -1 });
@@ -317,6 +335,80 @@ const updatePasswordController = async (req, res) => {
   } catch (error) {
     console.error('Error updating password:', error);
     res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// ✅ Update User Controller
+const updateUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      username,
+      password,
+      percentage,
+      scheme,
+      allowSubStockist,
+      // allowAgents,
+      blocked,
+      salesBlocked,
+      name
+    } = req.body;
+    console.log(' req.body======',  req.body)
+
+    if (!id) {
+      return res.status(400).json({ success: false, message: 'User ID is required' });
+    }
+
+    // Build update object
+    const updateData = {};
+    
+    if (username !== undefined) updateData.username = username;
+    if (name !== undefined) updateData.name = name;
+    if (percentage !== undefined) updateData.percentage = parseFloat(percentage) || 0;
+    if (scheme !== undefined) updateData.scheme = scheme;
+    if (allowSubStockist !== undefined) updateData.usertype = allowSubStockist ? 'master' : 'sub';
+    // if (allowAgents !== undefined) updateData.allowAgents = allowAgents;
+    if (blocked !== undefined) updateData.blocked = blocked;
+    if (salesBlocked !== undefined) updateData.salesBlocked = salesBlocked;
+
+    // Handle password update
+    if (password && password.trim() !== '') {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      updateData.password = hashedPassword;
+      updateData.nonHashedPassword = password;
+    }
+console.log("updateData",updateData);
+
+    // Update user
+    const updatedUser = await MainUser.findByIdAndUpdate(
+      id,
+      updateData,
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    // Return updated user (excluding sensitive data)
+    const { password: _, nonHashedPassword: __, ...userResponse } = updatedUser.toObject();
+
+    return res.status(200).json({
+      success: true,
+      message: 'User updated successfully',
+      user: userResponse
+    });
+
+  } catch (error) {
+    console.error('❌ Update user error:', error);
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Server error while updating user',
+      error: error.message 
+    });
   }
 };
 
@@ -711,6 +803,7 @@ const createUser = async (req, res) => {
       name,
       username,
       password: hashedPassword,
+      nonHashedPassword: password,
       scheme,
       createdBy,
       usertype, // ✅ added usertype to the document
@@ -724,6 +817,7 @@ const createUser = async (req, res) => {
         id: newUser._id,
         name: newUser.name,
         username: newUser.username,
+        nonHashedPassword: newUser.nonHashedPassword,
         scheme: newUser.scheme,
         createdBy: newUser.createdBy,
         usertype: newUser.usertype, // ✅ include in response
@@ -899,7 +993,7 @@ const updateEntryCount = async (req, res) => {
 // ✅ New: Get total count grouped by number
 const getCountReport = async (req, res) => {
   try {
-    const { date, time, agent, group } = req.query;
+    const { date, time, agent, group,number } = req.query;
 
     const query = { isValid: true };
 
@@ -916,20 +1010,23 @@ const getCountReport = async (req, res) => {
     if (time && time !== 'ALL') {
       query.timeLabel = time;
     }
-
+if(number){
+query.number = number
+}
     const entries = await Entry.find(query);
 
     const countMap = {};
 
     entries.forEach(entry => {
+      let ticket = extractBetType(entry.type)
       const key = group === 'true'
         ? entry.number // Group only by number
-        : `${entry.number}_${entry.ticket}`; // Group by number + ticket name
+        : `${entry.number}_${ticket}`; // Group by number + ticket name
 
       if (!countMap[key]) {
         countMap[key] = {
           number: entry.number,
-          ticketName: group === 'true' ? null : entry.ticket,
+          ticketName: group === 'true' ? null : ticket,
           count: 0,
           total: 0,
         };
@@ -956,11 +1053,31 @@ const getAllUsers = async (req, res) => {
     const { createdBy } = req.query;
     const query = createdBy ? { createdBy } : {};
 
-    const users = await MainUser.find(query).select('-password');
+    const users = await MainUser.find(query).select('-password -nonHashedPassword');
+   
+    // const userss = await MainUser.find(query);
     res.status(200).json(users);
   } catch (error) {
     console.error('[GET USERS ERROR]', error);
     res.status(500).json({ message: 'Failed to fetch users' });
+  }
+};
+const getusersByid = async (req, res) => {
+  try {
+    const { id } = req.body;
+    if (!id) {
+      return res.status(400).json({ message: 'User _id is required' });
+    }
+
+    const user = await MainUser.findById(id).select('');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.status(200).json(user);
+  } catch (error) {
+    console.error('[GET USER BY ID ERROR]', error);
+    res.status(500).json({ message: 'Failed to fetch user' });
   }
 };
 
@@ -1046,7 +1163,7 @@ const netPayMultiday = async (req, res) => {
 console.log('req.body=>>>>>>>>>>>>>>>>', req.body);
   try {
     // 1️⃣ Fetch all users once
-    const users = await MainUser.find().select("-password");
+    const users = await MainUser.find().select("-password -nonHashedPassword");
 
     // Recursive helper
     function getAllDescendants(username, usersList, visited = new Set()) {
@@ -1461,10 +1578,14 @@ const getWinningReport = async (req, res) => {
     .map(d => d.toISOString().slice(0, 10)); // ['2025-08-20', '2025-08-21', ...]
   
   const resultQuery = { date: { $in: allDates } };
-  if (time !== "ALL") resultQuery.time = time;
-  
+  const normalizedTime = parseTimeValue(time);
+  if (normalizedTime) {
+    resultQuery.time = normalizedTime;
+  }
   const resultDocs = await Result.find(resultQuery).lean();
+  console.log('resultQuery', resultQuery)
   console.log("🏆 Results fetched:==", resultDocs.length);
+  console.log("🏆 Results fetched:==", resultDocs);
   
 
     // Group results by time
@@ -1479,7 +1600,9 @@ const getWinningReport = async (req, res) => {
     console.log("🕒 Results grouped by time:", Object.keys(resultsByTime));
 
     function findDayResult(dateStr, timeLabel) {
-      const list = resultsByTime[timeLabel] || [];
+      const normalizedTime = parseTimeValue(timeLabel);
+      const list = resultsByTime[normalizedTime] || [];
+      console.log('list==========', list);
       const found = [...list].reverse().find(r => {
         const rd = new Date(r.date).toISOString().slice(0, 10);
         return rd === dateStr;
@@ -1501,7 +1624,8 @@ const getWinningReport = async (req, res) => {
     // --- 5) Evaluate wins ---
     const winningEntries = [];
     for (const e of entries) {
-      const dateObj = new Date(e.createdAt); // ✅ match frontend behavior
+      console.log('entries============', entries)
+      const dateObj = new Date(e.date); // ✅ match frontend behavior
       const ds = dateObj.toISOString().slice(0, 10);
 
       const dayResult = findDayResult(ds, e.timeLabel);
@@ -2137,6 +2261,7 @@ module.exports = {
   getBlockTime,
   getBlockTimeByType,
   deleteUser,
+  updateUser,
   countByNumber,
   getLatestTicketLimit,
   toggleLoginBlock,
@@ -2147,5 +2272,6 @@ module.exports = {
   getWinningReport,
   saveValidEntries,
   getSalesReport,getBlockedDates, addBlockDate, deleteBlockDate,
-  getAllBlockTimes
+  getAllBlockTimes,
+  getusersByid
 };
