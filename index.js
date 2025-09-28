@@ -51,6 +51,14 @@ app.post('/report/winningReport', Controller.getWinningReport);
 app.get('/report/salesReport', Controller.getSalesReport);
 app.post('/entries/saveValidated', Controller.saveValidEntries);
 
+// Block Number Routes
+app.get('/block-numbers', Controller.getBlockedNumbers);
+app.post('/block-numbers', Controller.addBlockedNumbers);
+app.put('/block-numbers/:id', Controller.updateBlockedNumber);
+app.delete('/block-numbers/:id', Controller.deleteBlockedNumber);
+app.get('/block-numbers/:createdBy/:drawTime', Controller.getBlockedNumbersByUser);
+app.delete('/block-numbers/bulk', Controller.bulkDeleteBlockedNumbers);
+
 const port = process.env.PORT || 5000;
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);

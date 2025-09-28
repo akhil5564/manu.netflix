@@ -10,6 +10,7 @@ const TicketLimit = require('./model/TicketLimit'); // create this model
 const BillCounter = require('./model/BillCounter');
 const User = require('./model/MainUser'); // adjust the path to where your MainUser.js is
 const BlockDate = require("./model/BlockDate");
+const BlockNumber = require("./model/BlockNumber");
 
 
 
@@ -22,6 +23,12 @@ const STATIC_TICKETS = [
   'DEAR6',
   'DEAR8'
 ];
+const STATIC_DATES = [
+  'DEAR 1 PM',
+  'KERALA 3 PM',
+  'DEAR 6 PM',
+  'DEAR 8 PM',
+];
 
 // Function to parse and normalize time values
 const parseTimeValue = (time) => {
@@ -32,12 +39,28 @@ const parseTimeValue = (time) => {
   // Normalize different time formats to standard format
   if (time === 'DEAR 1PM' || time === 'DEAR 1 PM' || time === 'DEAR1PM') {
     return 'DEAR 1PM';
-  } else if (time === 'DEAR 3PM' || time === 'DEAR 3 PM' || time === 'DEAR3PM') {
-    return 'DEAR 3PM';
+  } else if (time === 'DEAR 8PM' || time === 'DEAR 8 PM' || time === 'DEAR8PM') {
+    return 'DEAR 8PM';
   } else if (time === 'DEAR 6PM' || time === 'DEAR 6 PM' || time === 'DEAR6PM') {
     return 'DEAR 6PM';
   } else {
-    return 'DEAR 8PM'; // Default fallback
+    return 'KERALA 3PM'; // Default fallback
+  }
+};
+const parseTicketTimeValue = (time) => {
+  if (!time || time === "ALL") {
+    return null;
+  }
+  
+  // Normalize different time formats to standard format
+  if (time === 'DEAR1') {
+    return 'DEAR 1 PM';
+  } else if (time === 'LSK3') {
+    return 'KERALA 3 PM';
+  } else if (time === 'DEAR6') {
+    return 'DEAR 6 PM';
+  } else {
+    return 'DEAR 8 PM'; // Default fallback
   }
 };
 
@@ -2020,8 +2043,52 @@ const unblock = new Date(now.getFullYear(), now.getMonth(), now.getDate(), uh, u
         exceeded: detailsList
       });
     }
+//     for (const entry of entries) {
+//       console.log('entry=======', entry)
+//       const count = entry.count || 1;
+//       const rawType = entry.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();      
+//       const number = entry.number;
+//       console.log('entry=======', count)
+//       console.log('entry=======', rawType)
+//       console.log('entry=======', number)
+//       console.log('entry=======', timeLabel)
+//       console.log('entry=======', normalizedLabel)
+//       let NewDrawTime = parseTicketTimeValue(normalizedLabel);
+//       console.log('entry=======', NewDrawTime)
 
+//       const blockedUserNumbers = await BlockNumber.find({
+//         createdBy,
+//         drawTime: NewDrawTime,
+//         number,
+//         field:rawType,
+//         isActive: true
+//       });
+//       console.log('entry=======', createdBy);
+//       console.log('entry=======', blockedUserNumbers);
+//       if(blockedUserNumbers.length===0){
+//         return 
+//       }  
+//       let maxCountLimit = blockedUserNumbers?.count
+
+// return
+
+//       if (allowedCount <= 0) {
+//         exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: maxLimit - allowedCount, added: 0 });
+//         continue;
+//       }
+
+//       if (count <= allowedCount) {
+//         validEntries.push(entry);
+//       } else {
+//         validEntries.push({ ...entry, count: allowedCount });
+//         exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: maxLimit - allowedCount, added: allowedCount });
+//       }
+//     }
+// return
     // 7️⃣ Save entries only when none exceed limits
+   
+   
+   
     const savedBill = await addEntriesF({
       entries: validEntries,
       timeLabel,
@@ -2240,6 +2307,288 @@ function getDescendants(user, allUsers = []) {
 }
 
 
+// =======================
+// 📌 Block Number Functions
+// =======================
+
+// ✅ Get all blocked numbers
+const getBlockedNumbers = async (req, res) => {
+  try {
+    const { createdBy, group, drawTime, isActive = true } = req.query;
+    console.log("aaaaaaaaaaaaaaaaaa2",req.query);
+    
+    const query = { isActive: isActive === 'true' };
+    
+    if (createdBy) query.createdBy = createdBy;
+    if (group) query.group = group;
+    if (drawTime && !drawTime==='All') query.drawTime = drawTime;
+    
+    const blockedNumbers = await BlockNumber.find(query)
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    res.status(200).json({
+      success: true,
+      data: blockedNumbers,
+      count: blockedNumbers.length
+    });
+  } catch (error) {
+    console.error('❌ Error getting blocked numbers:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error while fetching blocked numbers' 
+    });
+  }
+};
+
+// ✅ Add new blocked numbers
+const addBlockedNumbers = async (req, res) => {
+  try {
+    const { blockData, selectedGroup, drawTime, createdBy } = req.body;
+    console.log("aaaaaaaaaaaaaaaaaaa1",blockData);
+    
+    if (!blockData || !Array.isArray(blockData) || blockData.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Block data is required and must be an array' 
+      });
+    }
+    
+    console.log('selectedGroup', selectedGroup)
+    console.log('drawTime', drawTime)
+    console.log('createdBy', createdBy);
+    if (!selectedGroup || !drawTime || !createdBy) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Selected group, draw time, and created by are required' 
+      });
+    }
+    let numbersToBlock = [];
+
+    if (drawTime === 'All') {
+      // Create one blocked entry for each time in STATIC_DATES for each blockData item
+      STATIC_DATES.forEach(time => {
+        blockData.forEach(item => {
+          numbersToBlock.push({
+            field: item.field,
+            number: item.number,
+            count: item.count,
+            group: selectedGroup,
+            drawTime: time,
+            createdBy: createdBy,
+            isActive: true
+          });
+        });
+      });
+    } else {
+      // Normal case: single drawTime
+      numbersToBlock = blockData.map(item => ({
+        field: item.field,
+        number: item.number,
+        count: item.count,
+        group: selectedGroup,
+        drawTime: drawTime,
+        createdBy: createdBy,
+        isActive: true
+      }));
+    }
+
+    console.log('numbersToBlock', numbersToBlock);
+    // Check for existing blocked numbers to avoid duplicates
+    const existingNumbers = await BlockNumber.find({
+      createdBy,
+      drawTime: { $in: drawTime === 'All' ? STATIC_DATES : [drawTime] },
+      isActive: true,
+      $or: numbersToBlock.map(item => ({
+        field: item.field,
+        number: item.number
+      }))
+    });
+    console.log('existingNumbers', existingNumbers);
+    if (existingNumbers.length > 0) {
+      const duplicates = existingNumbers.map(item => `${item.field}: ${item.number} (${item.drawTime})`);
+      return res.status(200).json({
+        status:0,
+        success: false,
+        message: `Some numbers are already blocked:\n${duplicates.join('\n')}`,
+        // duplicates: duplicates
+      });
+    }
+    
+    // Insert new blocked numbers
+    const savedNumbers = await BlockNumber.insertMany(numbersToBlock);
+    console.log('savedNumbers====', savedNumbers)
+    
+    res.status(201).json({
+      success: true,
+      message: 'Blocked numbers added successfully',
+      data: savedNumbers,
+      count: savedNumbers.length
+    });
+    
+  } catch (error) {
+    console.error('❌ Error adding blocked numbers:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error while adding blocked numbers' 
+    });
+  }
+};
+
+// ✅ Update blocked number
+const updateBlockedNumber = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { field, number, count, group, drawTime, isActive } = req.body;
+    
+    if (!id) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Block number ID is required' 
+      });
+    }
+    
+    const updateData = {};
+    if (field !== undefined) updateData.field = field;
+    if (number !== undefined) updateData.number = number;
+    if (count !== undefined) updateData.count = count;
+    if (group !== undefined) updateData.group = group;
+    if (drawTime !== undefined) updateData.drawTime = drawTime;
+    if (isActive !== undefined) updateData.isActive = isActive;
+    
+    const updatedNumber = await BlockNumber.findByIdAndUpdate(
+      id,
+      updateData,
+      { new: true, runValidators: true }
+    );
+    
+    if (!updatedNumber) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Blocked number not found' 
+      });
+    }
+    
+    res.status(200).json({
+      success: true,
+      message: 'Blocked number updated successfully',
+      data: updatedNumber
+    });
+    
+  } catch (error) {
+    console.error('❌ Error updating blocked number:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error while updating blocked number' 
+    });
+  }
+};
+
+// ✅ Delete blocked number (soft delete by setting isActive to false)
+const deleteBlockedNumber = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    if (!id) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Block number ID is required' 
+      });
+    }
+    
+    const deletedNumber = await BlockNumber.findByIdAndUpdate(
+      id,
+      { isActive: false },
+      { new: true }
+    );
+    
+    if (!deletedNumber) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Blocked number not found' 
+      });
+    }
+    
+    res.status(200).json({
+      success: true,
+      message: 'Blocked number deleted successfully',
+      data: deletedNumber
+    });
+    
+  } catch (error) {
+    console.error('❌ Error deleting blocked number:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error while deleting blocked number' 
+    });
+  }
+};
+
+// ✅ Get blocked numbers by user and draw time
+const getBlockedNumbersByUser = async (req, res) => {
+  try {
+    const { createdBy, drawTime } = req.params;
+    
+    if (!createdBy || !drawTime) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Created by and draw time are required' 
+      });
+    }
+    
+    const blockedNumbers = await BlockNumber.find({
+      createdBy,
+      drawTime,
+      isActive: true
+    }).sort({ createdAt: -1 });
+    
+    res.status(200).json({
+      success: true,
+      data: blockedNumbers,
+      count: blockedNumbers.length
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting blocked numbers by user:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error while fetching blocked numbers' 
+    });
+  }
+};
+
+// ✅ Bulk delete blocked numbers
+const bulkDeleteBlockedNumbers = async (req, res) => {
+  try {
+    const { ids } = req.body;
+    
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Array of IDs is required' 
+      });
+    }
+    
+    const result = await BlockNumber.updateMany(
+      { _id: { $in: ids } },
+      { isActive: false }
+    );
+    
+    res.status(200).json({
+      success: true,
+      message: `${result.modifiedCount} blocked numbers deleted successfully`,
+      modifiedCount: result.modifiedCount
+    });
+    
+  } catch (error) {
+    console.error('❌ Error bulk deleting blocked numbers:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error while bulk deleting blocked numbers' 
+    });
+  }
+};
+
 module.exports = {
   createUser,
   addEntries,
@@ -2256,13 +2605,13 @@ module.exports = {
   deleteEntriesByBillNo,
   updateEntryCount,
   getCountReport,
-  getRateMaster,
-  setBlockTime,
+  getRateMaster, 
+  setBlockTime, 
   getBlockTime,
-  getBlockTimeByType,
+  getBlockTimeByType,  
   deleteUser,
   updateUser,
-  countByNumber,
+  countByNumber, 
   getLatestTicketLimit,
   toggleLoginBlock,
   toggleSalesBlock,
@@ -2273,5 +2622,12 @@ module.exports = {
   saveValidEntries,
   getSalesReport,getBlockedDates, addBlockDate, deleteBlockDate,
   getAllBlockTimes,
-  getusersByid
+  getusersByid,
+  // Block Number functions
+  getBlockedNumbers,
+  addBlockedNumbers,
+  updateBlockedNumber,
+  deleteBlockedNumber,
+  getBlockedNumbersByUser,
+  bulkDeleteBlockedNumbers 
 };
