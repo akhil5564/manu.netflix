@@ -27,6 +27,7 @@ app.post('/ratemaster', Controller.saveRateMaster);
 app.post('/addResult', Controller.saveResult);
 app.get('/getResult', Controller.getResult);
 app.get('/entries', Controller.getEntries);
+app.get('/get-entries-with-timeblock', Controller.getEntriesWithTimeBlock);
 app.post('/login', Controller.loginUser);
 app.get('/next-bill', Controller.getNextBillNumber);
 app.patch('/invalidateEntry/:id', Controller.invalidateEntry);

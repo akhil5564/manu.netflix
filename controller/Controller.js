@@ -557,7 +557,8 @@ const getEntries = async (req, res) => {
       billNo,
       fromDate,
       toDate,
-      loggedInUser
+      loggedInUser,
+      usertype
     } = req.query;
 
     const query = { isValid: true };
@@ -624,7 +625,7 @@ const getEntries = async (req, res) => {
         return typeStr.split("-").pop();
       };
 
-      entries.forEach(e => {
+      entries.forEach(e => {       
         const betType = extractBetType(e.type);
         const rateLookup = rateMastersByDraw[e.timeLabel] || {};
         const rate = rateLookup[betType] ?? 10; // fallback default
@@ -632,6 +633,126 @@ const getEntries = async (req, res) => {
       });
     }
     res.status(200).json(entries);
+  } catch (error) {
+    console.error("[GET ENTRIES ERROR]", error);
+    res.status(500).json({ message: "Failed to fetch entries" });
+  }
+};
+const getEntriesWithTimeBlock = async (req, res) => {
+  try {
+    const {
+      createdBy,
+      timeCode,
+      timeLabel,
+      number,
+      count,
+      date,
+      billNo,
+      fromDate,
+      toDate,
+      loggedInUser,
+      usertype
+    } = req.query;
+
+    const query = { isValid: true };
+
+    if (createdBy) query.createdBy = createdBy;
+    if (timeCode) query.timeCode = timeCode;
+    if (timeLabel) query.timeLabel = timeLabel;
+    if (number) query.number = number;
+    if (count) query.count = parseInt(count);
+    if (billNo) query.billNo = billNo;
+
+    // Single date filter (using "date" field)
+    if (date) {
+      const start = new Date(date);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(date);
+      end.setHours(23, 59, 59, 999);
+      query.date = { $gte: start, $lte: end };
+    }
+    // Date range filter (using "date" field)
+    else if (fromDate && toDate) {
+      const start = new Date(fromDate);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(toDate);
+      end.setHours(23, 59, 59, 999);
+      query.date = { $gte: start, $lte: end };
+    }
+
+    // Sort primarily by date, secondarily by createdAt
+    const entries = await Entry.find(query).sort({ date: -1, createdAt: -1 });
+    console.log('entries===========', entries)
+    // If loggedInUser exists → adjust rates
+    if (loggedInUser && entries.length > 0) {
+      // Get unique draws
+      const uniqueDraws = [...new Set(entries.map(e => e.timeLabel))];
+
+      // Fetch rate masters for this user
+      const rateMastersByDraw = {};
+      for (const draw of uniqueDraws) {
+        let rateMasterQuery = { user: loggedInUser, draw };
+        if (draw === "LSK 3 PM") {
+          rateMasterQuery.draw = "KERALA 3 PM"; // your special case
+        }
+
+        const rateMaster = await RateMaster.findOne(rateMasterQuery);
+        const rateLookup = {};
+        (rateMaster?.rates || []).forEach(r => {
+          rateLookup[r.label] = Number(r.rate) || 10;
+        });
+        rateMastersByDraw[draw] = rateLookup;
+      }
+
+      // Apply rates to entries
+      const extractBetType = (typeStr) => {
+        if (!typeStr) return "SUPER";
+        if (typeStr.toUpperCase().includes("SUPER")) return "SUPER";
+        if (typeStr.toUpperCase().includes("BOX")) return "BOX";
+        if (typeStr.toUpperCase().includes("AB")) return "AB";
+        if (typeStr.toUpperCase().includes("BC")) return "BC";
+        if (typeStr.toUpperCase().includes("AC")) return "AC";
+        if (typeStr.includes("-A") || typeStr.endsWith("A")) return "A";
+        if (typeStr.includes("-B") || typeStr.endsWith("B")) return "B";
+        if (typeStr.includes("-C") || typeStr.endsWith("C")) return "C";
+        return typeStr.split("-").pop();
+      };
+
+      entries.forEach(e => {       
+        const betType = extractBetType(e.type);
+        const rateLookup = rateMastersByDraw[e.timeLabel] || {};
+        const rate = rateLookup[betType] ?? 10; // fallback default
+        e.rate = rate * (Number(e.count) || 0);
+      });
+    }
+    let updatedEntries=entries
+    if (entries.length > 0) {
+      const now = new Date();    
+       updatedEntries = entries.map(e => {
+        const obj = e.toObject(); // Convert Mongoose document → plain object
+    
+        const blockTimeData = getBlockTimeF(obj.timeLabel, usertype);
+        if (!blockTimeData || !blockTimeData.blockTime) {
+          obj.timeOver = 0;
+          return obj;
+        }
+    
+        const { blockTime } = blockTimeData;
+        const [bh, bm] = blockTime.split(":").map(Number);
+        // Use the entry's date instead of today
+const entryDate = new Date(obj.date); // the date of the entry
+const block = new Date(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), bh, bm);
+
+const now = new Date(); // current time
+obj.timeOver = now >= block ? 1 : 0;
+
+    
+        return obj;
+      });
+    
+    }
+    
+    return res.status(200).json(updatedEntries);
   } catch (error) {
     console.error("[GET ENTRIES ERROR]", error);
     res.status(500).json({ message: "Failed to fetch entries" });
@@ -2629,5 +2750,6 @@ module.exports = {
   updateBlockedNumber,
   deleteBlockedNumber,
   getBlockedNumbersByUser,
-  bulkDeleteBlockedNumbers 
+  bulkDeleteBlockedNumbers,
+  getEntriesWithTimeBlock 
 };
