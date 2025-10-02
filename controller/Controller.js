@@ -738,7 +738,7 @@ const getEntriesWithTimeBlock = async (req, res) => {
         }
     
         const { blockTime } = blockTimeData;
-        const [bh, bm] = blockTime.split(":").map(Number);
+        const [bh, bm] = blockTime.split(":").map(Number)
         // Use the entry's date instead of today
 const entryDate = new Date(obj.date); // the date of the entry
 const block = new Date(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), bh, bm);
@@ -1304,30 +1304,24 @@ function normalizeDrawLabel(label) {
 }
 const netPayMultiday = async (req, res) => {
   const { fromDate, toDate, time, agent } = req.body;
-console.log('req.body=>>>>>>>>>>>>>>>>', req.body);
+  console.log('req.body=>>>>>>>>>>>>>>>>', req.body);
+
   try {
-    // 1️⃣ Fetch all users once
     const users = await MainUser.find().select("-password -nonHashedPassword");
 
-    // Recursive helper
     function getAllDescendants(username, usersList, visited = new Set()) {
       if (visited.has(username)) return [];
       visited.add(username);
-
       const children = usersList.filter(u => u.createdBy === username).map(u => u.username);
       let all = [...children];
-      children.forEach(child => {
-        all = all.concat(getAllDescendants(child, usersList, visited));
-      });
+      children.forEach(child => all = all.concat(getAllDescendants(child, usersList, visited)));
       return all;
     }
 
-    // 2️⃣ Determine target agent(s)
     const agentUsers = agent
       ? [agent, ...getAllDescendants(agent, users)]
       : users.map(u => u.username);
 
-    // 3️⃣ Date range + time filter (supports string or array)
     const start = new Date(fromDate + "T00:00:00.000Z");
     const end = new Date(toDate + "T23:59:59.999Z");
 
@@ -1340,103 +1334,80 @@ console.log('req.body=>>>>>>>>>>>>>>>>', req.body);
     };
 
     if (!isAllTime) {
-      if (isArrayTime) {
-        if (time.length > 0) {
-          entryQuery = {
-            ...entryQuery,
-            timeLabel: { $in: time }
-          };
-        }
+      if (isArrayTime && time.length > 0) {
+        entryQuery.timeLabel = { $in: time };
       } else if (typeof time === 'string' && time.trim().length > 0) {
-        entryQuery = {
-          ...entryQuery,
-          timeLabel: time
-        };
+        entryQuery.timeLabel = time;
       }
     }
 
-    // 4️⃣ Fetch all entries in one go (instead of looping per day)
     const entries = await Entry.find(entryQuery);
-    // console.log('entries==========qq', entries)
-    // 5️⃣ Fetch all results for the same range (support string or array)
-    // Remove space before the last 2 characters (PM/AM)
+
     const stripSpaceBeforeMeridiem = (label) => label.replace(/\s+(PM|AM)$/gi, '$1');
 
-    let resultQuery = {
-      date: { $gte: fromDate, $lte: toDate }
-    };
+    let resultQuery = { date: { $gte: fromDate, $lte: toDate } };
 
     if (!isAllTime) {
       if (isArrayTime) {
         const times = (time || []).map(t => stripSpaceBeforeMeridiem(String(t)));
-        if (times.length > 0) {
-          resultQuery = {
-            time: { $in: times },
-            date: { $gte: fromDate, $lte: toDate }
-          };
-        }
+        if (times.length > 0) resultQuery.time = { $in: times };
       } else if (typeof time === 'string' && time.trim().length > 0) {
-        const filterTime = stripSpaceBeforeMeridiem(time);
-        console.log('Original time:', time);
-        console.log('Filtered time:', filterTime);
-        resultQuery = {
-          time: filterTime,
-          date: { $gte: fromDate, $lte: toDate }
-        };
+        resultQuery.time = stripSpaceBeforeMeridiem(time);
       }
     }
+
     const results = await Result.find(resultQuery).lean();
-    // const resultss = await Result.find({}).limit(5);
-    // console.log('resultQuery=>>>>>>>>>>>>>>>>', resultQuery);
+    console.log('resultQuery=>>>>>>>>>>>>>>>>', resultQuery);
     // console.log('results=>>>>>>>>>>>>>>>>', results);
-    // console.log('resultss=>>>>>>>>>>>>>>>>', resultss);
-    // Make result lookup by date
+
     const resultByDate = {};
     results.forEach(r => {
-      const dateStr = new Date(r.date).toISOString().slice(0, 10); // "YYYY-MM-DD"
-      // console.log('dateStr', dateStr)
+      const dateStr = new Date(r.date).toISOString().slice(0, 10);
       resultByDate[dateStr] = r;
     });
 
+    const userRates = await getUserRates(
+      agentUsers,
+      (isArrayTime ? 'All' : time),
+      req.body.fromAccountSummary,
+      req.body.loggedInUser
+    );
 
-const userRates = await getUserRates(
-  agentUsers,
-  (isArrayTime ? 'All' : time),
-  req.body.fromAccountSummary,
-  req.body.loggedInUser
-);
-    console.log('entry===========1', userRates)
-    // 6️⃣ Process entries with result of that day
     const processedEntries = entries.map(entry => {
       const entryDateStr = entry.date.toISOString().slice(0, 10);
       const dayResult = resultByDate[entryDateStr] || null;
-    
+
+      let normalizedResult = null;
+      if (dayResult) {
+        normalizedResult = {
+          "1": dayResult.prizes?.[0] || null,
+          "2": dayResult.prizes?.[1] || null,
+          "3": dayResult.prizes?.[2] || null,
+          "4": dayResult.prizes?.[3] || null,
+          "5": dayResult.prizes?.[4] || null,
+          others: (dayResult.entries || []).map(e => e.result).filter(Boolean)
+        };
+      }
+
       const userRateMap = userRates[entry.createdBy] || {};
-    
-      // ✅ normalize the timeLabel to match RateMaster
       const normalizedLabel = normalizeDrawLabel(entry.timeLabel);
-      console.log('normalizedLabel', normalizedLabel)
-    
       const drawRateMap = (isAllTime || isArrayTime)
         ? (userRateMap[normalizedLabel] || {})
         : (userRateMap[time] || {});
-    
+
       const betType = extractBetType(entry.type);
-      console.log('betType', betType)
-      console.log('drawRateMap', drawRateMap)
       const rate = drawRateMap[betType] ?? 10;
-      console.log('rate', rate)
-    
+      const winAmount = calculateWinAmount(entry, normalizedResult);
+
       return {
         ...entry.toObject(),
-        winAmount: calculateWinAmount(entry, dayResult),
+        winAmount,
         appliedRate: rate,
         calculatedAmount: rate * (Number(entry.count) || 0),
         date: entryDateStr
       };
     });
-    
-    console.log('processedEntries', processedEntries)
+
     if (processedEntries.length === 0) {
       return res.status(200).json({ message: "No entries found for given date range" });
     }
@@ -1450,11 +1421,13 @@ const userRates = await getUserRates(
       usersList: users.map(u => u.username),
       userRates
     });
+
   } catch (err) {
     console.error("[netPayMultiday ERROR]", err);
     res.status(500).json({ error: err.message });
   }
 };
+
 // async function getUserRates(usernames, time, fromAccountSummary, loggedInUser) {
 //   const encodedDraw = time;
 // let ratee = await RateMaster.find({})
@@ -1564,7 +1537,7 @@ function isDoubleNumber(numStr) {
 //   return parts[parts.length - 1]; // Get the last part (SUPER, BOX, etc.)
 // }
 const extractBetType = (typeStr) => {
-  console.log('typeStr', typeStr);
+  // console.log('typeStr', typeStr);
   if (!typeStr) return "SUPER";
   
   // Handle different patterns: LSK3SUPER, D-1-A, etc.
@@ -1687,7 +1660,7 @@ const getWinningReport = async (req, res) => {
     }
 
     const agentUsers = agent ? [agent, ...getAllDescendants(agent, users)] : users.map(u => u.username);
-    console.log("👥 Agent Users:", agentUsers);
+    // console.log("👥 Agent Users:", agentUsers);
 
     // build user->scheme map
     const userSchemeMap = {};
@@ -1729,7 +1702,7 @@ const getWinningReport = async (req, res) => {
   const resultDocs = await Result.find(resultQuery).lean();
   console.log('resultQuery', resultQuery)
   console.log("🏆 Results fetched:==", resultDocs.length);
-  console.log("🏆 Results fetched:==", resultDocs);
+  // console.log("🏆 Results fetched:==", resultDocs);
   
 
     // Group results by time
@@ -1741,12 +1714,12 @@ const getWinningReport = async (req, res) => {
     for (const t in resultsByTime) {
       resultsByTime[t].sort((a, b) => new Date(a.date) - new Date(b.date));
     }
-    console.log("🕒 Results grouped by time:", Object.keys(resultsByTime));
+    // console.log("🕒 Results grouped by time:", Object.keys(resultsByTime));
 
     function findDayResult(dateStr, timeLabel) {
       const normalizedTime = parseTimeValue(timeLabel);
       const list = resultsByTime[normalizedTime] || [];
-      console.log('list==========', list);
+      // console.log('list==========', list);
       const found = [...list].reverse().find(r => {
         const rd = new Date(r.date).toISOString().slice(0, 10);
         return rd === dateStr;
@@ -1768,7 +1741,7 @@ const getWinningReport = async (req, res) => {
     // --- 5) Evaluate wins ---
     const winningEntries = [];
     for (const e of entries) {
-      console.log('entries============', entries)
+      // console.log('entries============', entries)
       const dateObj = new Date(e.date); // ✅ match frontend behavior
       const ds = dateObj.toISOString().slice(0, 10);
 
@@ -2334,7 +2307,7 @@ const getSalesReport = async (req, res) => {
 
     // Helper: extract bet type
     const extractBetType = (typeStr) => {
-      console.log('typeStr', typeStr);
+      // console.log('typeStr', typeStr);
       if (!typeStr) return "SUPER";
       
       // Handle different patterns: LSK3SUPER, D-1-A, etc.
