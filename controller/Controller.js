@@ -35,7 +35,7 @@ const parseTimeValue = (time) => {
   if (!time || time === "ALL") {
     return null;
   }
-  
+
   // Normalize different time formats to standard format
   if (time === 'DEAR 1PM' || time === 'DEAR 1 PM' || time === 'DEAR1PM') {
     return 'DEAR 1PM';
@@ -51,7 +51,7 @@ const parseTicketTimeValue = (time) => {
   if (!time || time === "ALL") {
     return null;
   }
-  
+
   // Normalize different time formats to standard format
   if (time === 'DEAR1') {
     return 'DEAR 1 PM';
@@ -107,14 +107,14 @@ const addBlockDate = async (req, res) => {
     console.log('exists1=============', dates)
     const exists = await BlockDate.findOne({ ticket, date });
     if (exists) {
-      return res.status(201).json({status:2, message: "Already blocked" });
+      return res.status(201).json({ status: 2, message: "Already blocked" });
     }
 
     const blockDate = new BlockDate({ ticket, date });
     await blockDate.save();
-    res.status(201).json({status:1, message: "Blocked successfully", blockDate});
+    res.status(201).json({ status: 1, message: "Blocked successfully", blockDate });
   } catch (err) {
-    res.status(500).json({ status:0, message: "Error blocking date" });
+    res.status(500).json({ status: 0, message: "Error blocking date" });
   }
 };
 
@@ -376,7 +376,7 @@ const updateUser = async (req, res) => {
       salesBlocked,
       name
     } = req.body;
-    console.log(' req.body======',  req.body)
+    console.log(' req.body======', req.body)
 
     if (!id) {
       return res.status(400).json({ success: false, message: 'User ID is required' });
@@ -384,7 +384,7 @@ const updateUser = async (req, res) => {
 
     // Build update object
     const updateData = {};
-    
+
     if (username !== undefined) updateData.username = username;
     if (name !== undefined) updateData.name = name;
     if (percentage !== undefined) updateData.percentage = parseFloat(percentage) || 0;
@@ -400,7 +400,7 @@ const updateUser = async (req, res) => {
       updateData.password = hashedPassword;
       updateData.nonHashedPassword = password;
     }
-console.log("updateData",updateData);
+    console.log("updateData", updateData);
 
     // Update user
     const updatedUser = await MainUser.findByIdAndUpdate(
@@ -410,9 +410,9 @@ console.log("updateData",updateData);
     );
 
     if (!updatedUser) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'User not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
       });
     }
 
@@ -427,10 +427,10 @@ console.log("updateData",updateData);
 
   } catch (error) {
     console.error('❌ Update user error:', error);
-    return res.status(500).json({ 
-      success: false, 
+    return res.status(500).json({
+      success: false,
       message: 'Server error while updating user',
-      error: error.message 
+      error: error.message
     });
   }
 };
@@ -625,7 +625,7 @@ const getEntries = async (req, res) => {
         return typeStr.split("-").pop();
       };
 
-      entries.forEach(e => {       
+      entries.forEach(e => {
         const betType = extractBetType(e.type);
         const rateLookup = rateMastersByDraw[e.timeLabel] || {};
         const rate = rateLookup[betType] ?? 10; // fallback default
@@ -718,40 +718,40 @@ const getEntriesWithTimeBlock = async (req, res) => {
         return typeStr.split("-").pop();
       };
 
-      entries.forEach(e => {       
+      entries.forEach(e => {
         const betType = extractBetType(e.type);
         const rateLookup = rateMastersByDraw[e.timeLabel] || {};
         const rate = rateLookup[betType] ?? 10; // fallback default
         e.rate = rate * (Number(e.count) || 0);
       });
     }
-    let updatedEntries=entries
+    let updatedEntries = entries
     if (entries.length > 0) {
-      const now = new Date();    
-       updatedEntries = entries.map(e => {
+      const now = new Date();
+      updatedEntries = entries.map(e => {
         const obj = e.toObject(); // Convert Mongoose document → plain object
-    
+
         const blockTimeData = getBlockTimeF(obj.timeLabel, usertype);
         if (!blockTimeData || !blockTimeData.blockTime) {
           obj.timeOver = 0;
           return obj;
         }
-    
+
         const { blockTime } = blockTimeData;
         const [bh, bm] = blockTime.split(":").map(Number)
         // Use the entry's date instead of today
-const entryDate = new Date(obj.date); // the date of the entry
-const block = new Date(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), bh, bm);
+        const entryDate = new Date(obj.date); // the date of the entry
+        const block = new Date(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), bh, bm);
 
-const now = new Date(); // current time
-obj.timeOver = now >= block ? 1 : 0;
+        const now = new Date(); // current time
+        obj.timeOver = now >= block ? 1 : 0;
 
-    
+
         return obj;
       });
-    
+
     }
-    
+
     return res.status(200).json(updatedEntries);
   } catch (error) {
     console.error("[GET ENTRIES ERROR]", error);
@@ -788,8 +788,28 @@ const invalidateEntry = async (req, res) => {
 
 const deleteEntryById = async (req, res) => {
   try {
-    const { id } = req.params;
+    const { id, userType } = req.params;
+    
+    const obj = await Entry.findById(id);
+    console.log('obj=========', obj)
+    const usertype = userType;
+    const timeLabel = obj.timeLabel;
+    const blockTimeData = await getBlockTimeF(timeLabel, usertype);
+    console.log('blockTimeData==========', blockTimeData)
+    if (!blockTimeData || !blockTimeData.blockTime) {
+      return res.status(400).json({ message: 'Block time not found' });
+    }
 
+    const { blockTime } = blockTimeData;
+    const [bh, bm] = blockTime.split(":").map(Number)
+    // Use the entry's date instead of today
+    const entryDate = new Date(obj.date); // the date of the entry
+    const block = new Date(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), bh, bm);
+
+    const now = new Date(); // current time
+    if (now >= block) {
+      return res.status(400).json({ message: 'Cannot delete entry, Entry time is blocked for this draw' });
+    }
     const deletedEntry = await Entry.findByIdAndDelete(id);
 
     if (!deletedEntry) {
@@ -864,7 +884,7 @@ const getLatestTicketLimit = async (req, res) => {
 const getResult = async (req, res) => {
   try {
     const { date, time } = req.query;
-console.log('req.query', req.query);
+    console.log('req.query', req.query);
     if (!time) {
       return res.status(400).json({ message: 'Missing time parameter' });
     }
@@ -876,14 +896,14 @@ console.log('req.query', req.query);
     let query = { time, date };
 
     // Find all matching result documents
-  
+
     const resultDocs = await Result.find(query).lean();
     const resultDoc = await Result.find({}).lean();
     // console.log('resultDoc=>>>>>>>>>>>>>>>>', resultDoc)
     console.log('resultDoc=>>>>>>>>>>>>>>>>', resultDocs)
 
     if (!resultDocs || resultDocs.length === 0) {
-      return res.status(200).json({ message: 'No results found for given parameters',status:0 });
+      return res.status(200).json({ message: 'No results found for given parameters', status: 0 });
     }
 
     // Map each document to response format
@@ -907,7 +927,7 @@ console.log('req.query', req.query);
     });
 
     console.log('results=>>>>>>>>>>>>>>>>', results)
-    return res.status(200).json({data:results,status:1,message:'Result fetched successfully'});
+    return res.status(200).json({ data: results, status: 1, message: 'Result fetched successfully' });
     // return res.json(results); // returns array of result objects for each date
   } catch (error) {
     console.error('[GET RESULT ERROR]', error);
@@ -1090,13 +1110,13 @@ const getRateMaster = async (req, res) => {
     if (!user || !draw) {
       return res.status(400).json({ message: 'User and draw are required' });
     }
-    let RateMasterQuery={}
-    if(user){
+    let RateMasterQuery = {}
+    if (user) {
       RateMasterQuery.user = user
     }
-    if(draw){
+    if (draw) {
       RateMasterQuery.draw = draw
-    }if(draw === "LSK 3 PM"){
+    } if (draw === "LSK 3 PM") {
       RateMasterQuery.draw = "KERALA 3 PM"
     }
     console.log('RateMasterQuery', RateMasterQuery)
@@ -1119,9 +1139,29 @@ const getRateMaster = async (req, res) => {
 const updateEntryCount = async (req, res) => {
   try {
     const { id } = req.params;
-    const { count } = req.body;
-    if (!count || isNaN(count)) return res.status(400).json({ message: 'Invalid count' });
+    const { count,userType } = req.body;
 
+    if (!count || isNaN(count)) return res.status(400).json({ message: 'Invalid count' });
+    const obj = await Entry.findById(id);
+    console.log('obj=========', obj)
+    const usertype = userType;
+    const timeLabel = obj.timeLabel;
+    const blockTimeData = await getBlockTimeF(timeLabel, usertype);
+    console.log('blockTimeData==========', blockTimeData)
+    if (!blockTimeData || !blockTimeData.blockTime) {
+      return res.status(400).json({ message: 'Block time not found' });
+    }
+
+    const { blockTime } = blockTimeData;
+    const [bh, bm] = blockTime.split(":").map(Number)
+    // Use the entry's date instead of today
+    const entryDate = new Date(obj.date); // the date of the entry
+    const block = new Date(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), bh, bm);
+
+    const now = new Date(); // current time
+    if (now >= block) {
+      return res.status(400).json({ message: 'Cannot update count, Entry time is blocked for this draw' });
+    }
     const updated = await Entry.findByIdAndUpdate(id, { count: parseInt(count) }, { new: true });
     if (!updated) return res.status(404).json({ message: 'Entry not found' });
 
@@ -1137,7 +1177,7 @@ const updateEntryCount = async (req, res) => {
 // ✅ New: Get total count grouped by number
 const getCountReport = async (req, res) => {
   try {
-    const { date, time, agent, group,number } = req.query;
+    const { date, time, agent, group, number } = req.query;
 
     const query = { isValid: true };
 
@@ -1154,9 +1194,9 @@ const getCountReport = async (req, res) => {
     if (time && time !== 'ALL') {
       query.timeLabel = time;
     }
-if(number){
-query.number = number
-}
+    if (number) {
+      query.number = number
+    }
     const entries = await Entry.find(query);
 
     const countMap = {};
@@ -1198,7 +1238,7 @@ const getAllUsers = async (req, res) => {
     const query = createdBy ? { createdBy } : {};
 
     const users = await MainUser.find(query).select('-password -nonHashedPassword');
-   
+
     // const userss = await MainUser.find(query);
     res.status(200).json(users);
   } catch (error) {
@@ -1238,58 +1278,58 @@ const payouts = {
 
 // Helper function to calculate win amount
 const calculateWinAmount = (entry, results) => {
-    if (!results || !results["1"]) return 0;
+  if (!results || !results["1"]) return 0;
 
-    const firstPrize = results["1"];
-    const others = Array.isArray(results.others) ? results.others : [];
-    const allPrizes = [
-      results["1"],
-      results["2"],
-      results["3"],
-      results["4"],
-      results["5"],
-      ...others,
-    ].filter(Boolean);
+  const firstPrize = results["1"];
+  const others = Array.isArray(results.others) ? results.others : [];
+  const allPrizes = [
+    results["1"],
+    results["2"],
+    results["3"],
+    results["4"],
+    results["5"],
+    ...others,
+  ].filter(Boolean);
 
-    const num = entry.number;
-    const count = entry.count || 0;
-    const baseType = extractBetType(entry.type);
+  const num = entry.number;
+  const count = entry.count || 0;
+  const baseType = extractBetType(entry.type);
 
-    let winAmount = 0;
-    
-    if (baseType === "SUPER") {
-      const prizePos = allPrizes.indexOf(num) + 1;
-      if (prizePos > 0) {
-        winAmount = (payouts.SUPER[prizePos] || payouts.SUPER.other) * count;
-      }
-    } else if (baseType === "BOX") {
-      if (num === firstPrize) {
-        winAmount = isDoubleNumber(firstPrize)
-          ? payouts.BOX.double.perfect * count
-          : payouts.BOX.normal.perfect * count;
-      } else if (
-        num.split("").sort().join("") === firstPrize.split("").sort().join("")
-      ) {
-        winAmount = isDoubleNumber(firstPrize)
-          ? payouts.BOX.double.permutation * count
-          : payouts.BOX.normal.permutation * count;
-      }
-    } else if (baseType === "AB" && num === firstPrize.slice(0, 2)) {
-      winAmount = payouts.AB_BC_AC * count;
-    } else if (baseType === "BC" && num === firstPrize.slice(1, 3)) {
-      winAmount = payouts.AB_BC_AC * count;
-    } else if (baseType === "AC" && num === firstPrize[0] + firstPrize[2]) {
-      winAmount = payouts.AB_BC_AC * count;
-    } else if (baseType === "A" && num === firstPrize[0]) {
-      winAmount = payouts.A_B_C * count;
-    } else if (baseType === "B" && num === firstPrize[1]) {
-      winAmount = payouts.A_B_C * count;
-    } else if (baseType === "C" && num === firstPrize[2]) {
-      winAmount = payouts.A_B_C * count;
+  let winAmount = 0;
+
+  if (baseType === "SUPER") {
+    const prizePos = allPrizes.indexOf(num) + 1;
+    if (prizePos > 0) {
+      winAmount = (payouts.SUPER[prizePos] || payouts.SUPER.other) * count;
     }
+  } else if (baseType === "BOX") {
+    if (num === firstPrize) {
+      winAmount = isDoubleNumber(firstPrize)
+        ? payouts.BOX.double.perfect * count
+        : payouts.BOX.normal.perfect * count;
+    } else if (
+      num.split("").sort().join("") === firstPrize.split("").sort().join("")
+    ) {
+      winAmount = isDoubleNumber(firstPrize)
+        ? payouts.BOX.double.permutation * count
+        : payouts.BOX.normal.permutation * count;
+    }
+  } else if (baseType === "AB" && num === firstPrize.slice(0, 2)) {
+    winAmount = payouts.AB_BC_AC * count;
+  } else if (baseType === "BC" && num === firstPrize.slice(1, 3)) {
+    winAmount = payouts.AB_BC_AC * count;
+  } else if (baseType === "AC" && num === firstPrize[0] + firstPrize[2]) {
+    winAmount = payouts.AB_BC_AC * count;
+  } else if (baseType === "A" && num === firstPrize[0]) {
+    winAmount = payouts.A_B_C * count;
+  } else if (baseType === "B" && num === firstPrize[1]) {
+    winAmount = payouts.A_B_C * count;
+  } else if (baseType === "C" && num === firstPrize[2]) {
+    winAmount = payouts.A_B_C * count;
+  }
 
-    return winAmount;
-  };
+  return winAmount;
+};
 
 // Pseudocode based on your frontend logic
 const drawLabelMap = {
@@ -1539,7 +1579,7 @@ function isDoubleNumber(numStr) {
 const extractBetType = (typeStr) => {
   // console.log('typeStr', typeStr);
   if (!typeStr) return "SUPER";
-  
+
   // Handle different patterns: LSK3SUPER, D-1-A, etc.
   if (typeStr.toUpperCase().includes("SUPER")) {
     return "SUPER";
@@ -1558,7 +1598,7 @@ const extractBetType = (typeStr) => {
   } else if (typeStr.includes("-C") || typeStr.endsWith("C")) {
     return "C";
   }
-  
+
   // Fallback: extract from parts
   const parts = typeStr.split("-");
   return parts[parts.length - 1];
@@ -1616,7 +1656,7 @@ function computeWinType(entry, results) {
     return "";
   }
 
-  if (["AB","BC","AC","A","B","C"].includes(baseType)) return baseType;
+  if (["AB", "BC", "AC", "A", "B", "C"].includes(baseType)) return baseType;
   return "";
 }
 function getDatesBetween(start, end) {
@@ -1668,7 +1708,7 @@ const getWinningReport = async (req, res) => {
 
     // --- 2) Date range ---
     const start = new Date(fromDate + "T00:00:00.000Z");
-    const end   = new Date(toDate   + "T23:59:59.999Z");
+    const end = new Date(toDate + "T23:59:59.999Z");
     console.log("📅 Date Range:", start, "to", end);
 
     // --- 3) Entries ---
@@ -1692,18 +1732,18 @@ const getWinningReport = async (req, res) => {
 
     // --- 4) Results ---
     const allDates = getDatesBetween(new Date(fromDate), new Date(toDate))
-    .map(d => d.toISOString().slice(0, 10)); // ['2025-08-20', '2025-08-21', ...]
-  
-  const resultQuery = { date: { $in: allDates } };
-  const normalizedTime = parseTimeValue(time);
-  if (normalizedTime) {
-    resultQuery.time = normalizedTime;
-  }
-  const resultDocs = await Result.find(resultQuery).lean();
-  console.log('resultQuery', resultQuery)
-  console.log("🏆 Results fetched:==", resultDocs.length);
-  // console.log("🏆 Results fetched:==", resultDocs);
-  
+      .map(d => d.toISOString().slice(0, 10)); // ['2025-08-20', '2025-08-21', ...]
+
+    const resultQuery = { date: { $in: allDates } };
+    const normalizedTime = parseTimeValue(time);
+    if (normalizedTime) {
+      resultQuery.time = normalizedTime;
+    }
+    const resultDocs = await Result.find(resultQuery).lean();
+    console.log('resultQuery', resultQuery)
+    console.log("🏆 Results fetched:==", resultDocs.length);
+    // console.log("🏆 Results fetched:==", resultDocs);
+
 
     // Group results by time
     const resultsByTime = {};
@@ -1830,7 +1870,9 @@ async function getBlockTimeF(drawLabel, loggedInUserType) {
   const normalizedLabel = normalizeDrawLabelLimit(drawLabel);
 
   let record = await BlockTime.findOne({ drawLabel: originalLabel, type: loggedInUserType });
- 
+  // let record2 = await BlockTime.find({});
+  // console.log('record2=============', record2);
+  console.log('record=============', normalizedLabel)
 
   if (!record) {
     // Try normalized (space/AM/PM removed, uppercased)
@@ -1842,7 +1884,7 @@ async function getBlockTimeF(drawLabel, loggedInUserType) {
     const escaped = normalizedLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     record = await BlockTime.findOne({ drawLabel: { $regex: `^${escaped}$`, $options: 'i' }, type: loggedInUserType });
   }
-  
+
   if (!record) return null;
   console.log('record=============', record)
   return {
@@ -1855,13 +1897,13 @@ const getTicketLimits = async () => {
     const latest = await TicketLimit.findOne().sort({ _id: -1 }); // latest record
     if (!latest) {
       return null
-    }else{
+    } else {
       return latest
     }
   } catch (err) {
-    console.log("sssssssssss",err);
+    console.log("sssssssssss", err);
     return null
-    
+
   }
 };
 
@@ -2003,7 +2045,7 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
   return { message: "Entries saved successfully", billNo };
 };
 
- const saveValidEntries = async (req, res) => {
+const saveValidEntries = async (req, res) => {
   try {
     const { entries, timeLabel, timeCode, selectedAgent, createdBy, toggleCount, loggedInUserType } = req.body;
     // console.log('req.body;', req.body)
@@ -2017,9 +2059,9 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
     // console.log('todayStr==============', todayStr)
     // const datesss = await BlockDate.find({});
     // console.log('exists1=============', datesss)
-    const blockedDates = await BlockDate.findOne({date: todayStr , ticket:normalizedLabel});
+    const blockedDates = await BlockDate.findOne({ date: todayStr, ticket: normalizedLabel });
     // console.log('blockedDates==============', blockedDates)
-    
+
     if (blockedDates) {
       return res.status(400).json({ message: 'Today is blocked for this ticket ' });
     }
@@ -2031,18 +2073,18 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
     const { blockTime, unblockTime } = blockTimeData;
     if (!blockTime || !unblockTime) return res.status(400).json({ message: 'Block or unblock time missing' });
 
-    
+
     // const block = new Date(`${todayStr}T${blockTime}:00`);
     // const unblock = new Date(`${todayStr}T${unblockTime}:00`);
     const [bh, bm] = blockTime.split(':').map(Number);
-const [uh, um] = unblockTime.split(':').map(Number);
+    const [uh, um] = unblockTime.split(':').map(Number);
 
-const block = new Date(now.getFullYear(), now.getMonth(), now.getDate(), bh, bm);
-// console.log('block', block)
-const unblock = new Date(now.getFullYear(), now.getMonth(), now.getDate(), uh, um);
-// console.log('unblock', unblock)
-// console.log('unblock', now >= block );
-// console.log('unblock', now < unblock)
+    const block = new Date(now.getFullYear(), now.getMonth(), now.getDate(), bh, bm);
+    // console.log('block', block)
+    const unblock = new Date(now.getFullYear(), now.getMonth(), now.getDate(), uh, um);
+    // console.log('unblock', unblock)
+    // console.log('unblock', now >= block );
+    // console.log('unblock', now < unblock)
 
     if (now >= block && now < unblock) {
       return res.status(403).json({ message: 'Entry time is blocked for this draw' });
@@ -2062,7 +2104,7 @@ const unblock = new Date(now.getFullYear(), now.getMonth(), now.getDate(), uh, u
     const allLimits = { ...limits.group1, ...limits.group2, ...limits.group3 };
 
     // 3️⃣ Sum counts per type-number for new entries
-    const newTotalByNumberType ={};
+    const newTotalByNumberType = {};
     entries.forEach((entry) => {
       const rawType = entry.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
       const key = `${rawType}-${entry.number}`;
@@ -2074,8 +2116,8 @@ const unblock = new Date(now.getFullYear(), now.getMonth(), now.getDate(), uh, u
     const remainingMap = await countByUsageF(targetDateStr, keys);
 
     // 5️⃣ Validate entries
-    const validEntries= [];
-    const exceededEntries= [];
+    const validEntries = [];
+    const exceededEntries = [];
 
     for (const entry of entries) {
       const count = entry.count || 1;
@@ -2110,7 +2152,7 @@ const unblock = new Date(now.getFullYear(), now.getMonth(), now.getDate(), uh, u
       selectedAgent,
       createdBy,
       toggleCount,);
-    
+
     // 6️⃣ Enforce strict limit: if any item exceeds the limit, reject entire save
     if (exceededEntries.length > 0) {
       const detailsList = exceededEntries.map(e => {
@@ -2137,52 +2179,52 @@ const unblock = new Date(now.getFullYear(), now.getMonth(), now.getDate(), uh, u
         exceeded: detailsList
       });
     }
-//     for (const entry of entries) {
-//       console.log('entry=======', entry)
-//       const count = entry.count || 1;
-//       const rawType = entry.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();      
-//       const number = entry.number;
-//       console.log('entry=======', count)
-//       console.log('entry=======', rawType)
-//       console.log('entry=======', number)
-//       console.log('entry=======', timeLabel)
-//       console.log('entry=======', normalizedLabel)
-//       let NewDrawTime = parseTicketTimeValue(normalizedLabel);
-//       console.log('entry=======', NewDrawTime)
+    //     for (const entry of entries) {
+    //       console.log('entry=======', entry)
+    //       const count = entry.count || 1;
+    //       const rawType = entry.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();      
+    //       const number = entry.number;
+    //       console.log('entry=======', count)
+    //       console.log('entry=======', rawType)
+    //       console.log('entry=======', number)
+    //       console.log('entry=======', timeLabel)
+    //       console.log('entry=======', normalizedLabel)
+    //       let NewDrawTime = parseTicketTimeValue(normalizedLabel);
+    //       console.log('entry=======', NewDrawTime)
 
-//       const blockedUserNumbers = await BlockNumber.find({
-//         createdBy,
-//         drawTime: NewDrawTime,
-//         number,
-//         field:rawType,
-//         isActive: true
-//       });
-//       console.log('entry=======', createdBy);
-//       console.log('entry=======', blockedUserNumbers);
-//       if(blockedUserNumbers.length===0){
-//         return 
-//       }  
-//       let maxCountLimit = blockedUserNumbers?.count
+    //       const blockedUserNumbers = await BlockNumber.find({
+    //         createdBy,
+    //         drawTime: NewDrawTime,
+    //         number,
+    //         field:rawType,
+    //         isActive: true
+    //       });
+    //       console.log('entry=======', createdBy);
+    //       console.log('entry=======', blockedUserNumbers);
+    //       if(blockedUserNumbers.length===0){
+    //         return 
+    //       }  
+    //       let maxCountLimit = blockedUserNumbers?.count
 
-// return
+    // return
 
-//       if (allowedCount <= 0) {
-//         exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: maxLimit - allowedCount, added: 0 });
-//         continue;
-//       }
+    //       if (allowedCount <= 0) {
+    //         exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: maxLimit - allowedCount, added: 0 });
+    //         continue;
+    //       }
 
-//       if (count <= allowedCount) {
-//         validEntries.push(entry);
-//       } else {
-//         validEntries.push({ ...entry, count: allowedCount });
-//         exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: maxLimit - allowedCount, added: allowedCount });
-//       }
-//     }
-// return
+    //       if (count <= allowedCount) {
+    //         validEntries.push(entry);
+    //       } else {
+    //         validEntries.push({ ...entry, count: allowedCount });
+    //         exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: maxLimit - allowedCount, added: allowedCount });
+    //       }
+    //     }
+    // return
     // 7️⃣ Save entries only when none exceed limits
-   
-   
-   
+
+
+
     const savedBill = await addEntriesF({
       entries: validEntries,
       timeLabel,
@@ -2214,7 +2256,7 @@ const unblock = new Date(now.getFullYear(), now.getMonth(), now.getDate(), uh, u
                   $let: {
                     vars: { curr: "$remaining" },
                     in: {
-                      $max: [ 0, { $subtract: [ { $ifNull: ["$$curr", max] }, used ] } ]
+                      $max: [0, { $subtract: [{ $ifNull: ["$$curr", max] }, used] }]
                     }
                   }
                 }
@@ -2273,43 +2315,43 @@ const getSalesReport = async (req, res) => {
 
     // 3️⃣ Fetch RateMaster for each draw
     const userForRate = loggedInUser;
-    
+
     console.log('userForRate===========', userForRate)
     console.log('timeLabel===========', timeLabel)
-    
+
     // Get unique draws from entries
     const uniqueDraws = [...new Set(entries.map(entry => entry.timeLabel))];
     console.log('uniqueDraws===========', uniqueDraws);
-    
+
     // Fetch rate masters for each draw
     const rateMastersByDraw = {};
     for (const draw of uniqueDraws) {
       let rateMasterQuery = { user: userForRate };
-      
+
       if (draw === "LSK 3 PM") {
         rateMasterQuery.draw = "KERALA 3 PM";
       } else {
         rateMasterQuery.draw = draw;
       }
-      
+
       console.log(`rateMasterQuery for ${draw}:`, rateMasterQuery);
       const rateMaster = await RateMaster.findOne(rateMasterQuery);
       console.log(`rateMaster for ${draw}:`, rateMaster);
-      
+
       const rateLookup = {};
       (rateMaster?.rates || []).forEach(r => {
         rateLookup[r.label] = Number(r.rate) || 10;
       });
       rateMastersByDraw[draw] = rateLookup;
     }
-    
+
     console.log("💰 Rate masters by draw:", rateMastersByDraw);
 
     // Helper: extract bet type
     const extractBetType = (typeStr) => {
       // console.log('typeStr', typeStr);
       if (!typeStr) return "SUPER";
-      
+
       // Handle different patterns: LSK3SUPER, D-1-A, etc.
       if (typeStr.toUpperCase().includes("SUPER")) {
         return "SUPER";
@@ -2328,7 +2370,7 @@ const getSalesReport = async (req, res) => {
       } else if (typeStr.includes("-C") || typeStr.endsWith("C")) {
         return "C";
       }
-      
+
       // Fallback: extract from parts
       const parts = typeStr.split("-");
       return parts[parts.length - 1];
@@ -2344,9 +2386,9 @@ const getSalesReport = async (req, res) => {
       const draw = entry.timeLabel;
       const rateLookup = rateMastersByDraw[draw] || {};
       const rate = rateLookup[betType] ?? 10;
-      
+
       console.log(`Entry: ${entry.type}, Draw: ${draw}, BetType: ${betType}, Rate: ${rate}, Count: ${count}`);
-      
+
       totalCount += count;
       totalSales += count * rate;
       entry.rate = count * rate;
@@ -2409,18 +2451,18 @@ function getDescendants(user, allUsers = []) {
 const getBlockedNumbers = async (req, res) => {
   try {
     const { createdBy, group, drawTime, isActive = true } = req.query;
-    console.log("aaaaaaaaaaaaaaaaaa2",req.query);
-    
+    console.log("aaaaaaaaaaaaaaaaaa2", req.query);
+
     const query = { isActive: isActive === 'true' };
-    
+
     if (createdBy) query.createdBy = createdBy;
     if (group) query.group = group;
-    if (drawTime && !drawTime==='All') query.drawTime = drawTime;
-    
+    if (drawTime && !drawTime === 'All') query.drawTime = drawTime;
+
     const blockedNumbers = await BlockNumber.find(query)
       .sort({ createdAt: -1 })
       .lean();
-    
+
     res.status(200).json({
       success: true,
       data: blockedNumbers,
@@ -2428,9 +2470,9 @@ const getBlockedNumbers = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Error getting blocked numbers:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while fetching blocked numbers' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching blocked numbers'
     });
   }
 };
@@ -2439,22 +2481,22 @@ const getBlockedNumbers = async (req, res) => {
 const addBlockedNumbers = async (req, res) => {
   try {
     const { blockData, selectedGroup, drawTime, createdBy } = req.body;
-    console.log("aaaaaaaaaaaaaaaaaaa1",blockData);
-    
+    console.log("aaaaaaaaaaaaaaaaaaa1", blockData);
+
     if (!blockData || !Array.isArray(blockData) || blockData.length === 0) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Block data is required and must be an array' 
+      return res.status(400).json({
+        success: false,
+        message: 'Block data is required and must be an array'
       });
     }
-    
+
     console.log('selectedGroup', selectedGroup)
     console.log('drawTime', drawTime)
     console.log('createdBy', createdBy);
     if (!selectedGroup || !drawTime || !createdBy) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Selected group, draw time, and created by are required' 
+      return res.status(400).json({
+        success: false,
+        message: 'Selected group, draw time, and created by are required'
       });
     }
     let numbersToBlock = [];
@@ -2502,29 +2544,29 @@ const addBlockedNumbers = async (req, res) => {
     if (existingNumbers.length > 0) {
       const duplicates = existingNumbers.map(item => `${item.field}: ${item.number} (${item.drawTime})`);
       return res.status(200).json({
-        status:0,
+        status: 0,
         success: false,
         message: `Some numbers are already blocked:\n${duplicates.join('\n')}`,
         // duplicates: duplicates
       });
     }
-    
+
     // Insert new blocked numbers
     const savedNumbers = await BlockNumber.insertMany(numbersToBlock);
     console.log('savedNumbers====', savedNumbers)
-    
+
     res.status(201).json({
       success: true,
       message: 'Blocked numbers added successfully',
       data: savedNumbers,
       count: savedNumbers.length
     });
-    
+
   } catch (error) {
     console.error('❌ Error adding blocked numbers:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while adding blocked numbers' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error while adding blocked numbers'
     });
   }
 };
@@ -2534,14 +2576,14 @@ const updateBlockedNumber = async (req, res) => {
   try {
     const { id } = req.params;
     const { field, number, count, group, drawTime, isActive } = req.body;
-    
+
     if (!id) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Block number ID is required' 
+      return res.status(400).json({
+        success: false,
+        message: 'Block number ID is required'
       });
     }
-    
+
     const updateData = {};
     if (field !== undefined) updateData.field = field;
     if (number !== undefined) updateData.number = number;
@@ -2549,31 +2591,31 @@ const updateBlockedNumber = async (req, res) => {
     if (group !== undefined) updateData.group = group;
     if (drawTime !== undefined) updateData.drawTime = drawTime;
     if (isActive !== undefined) updateData.isActive = isActive;
-    
+
     const updatedNumber = await BlockNumber.findByIdAndUpdate(
       id,
       updateData,
       { new: true, runValidators: true }
     );
-    
+
     if (!updatedNumber) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Blocked number not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'Blocked number not found'
       });
     }
-    
+
     res.status(200).json({
       success: true,
       message: 'Blocked number updated successfully',
       data: updatedNumber
     });
-    
+
   } catch (error) {
     console.error('❌ Error updating blocked number:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while updating blocked number' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error while updating blocked number'
     });
   }
 };
@@ -2582,38 +2624,38 @@ const updateBlockedNumber = async (req, res) => {
 const deleteBlockedNumber = async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     if (!id) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Block number ID is required' 
+      return res.status(400).json({
+        success: false,
+        message: 'Block number ID is required'
       });
     }
-    
+
     const deletedNumber = await BlockNumber.findByIdAndUpdate(
       id,
       { isActive: false },
       { new: true }
     );
-    
+
     if (!deletedNumber) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Blocked number not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'Blocked number not found'
       });
     }
-    
+
     res.status(200).json({
       success: true,
       message: 'Blocked number deleted successfully',
       data: deletedNumber
     });
-    
+
   } catch (error) {
     console.error('❌ Error deleting blocked number:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while deleting blocked number' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error while deleting blocked number'
     });
   }
 };
@@ -2622,31 +2664,31 @@ const deleteBlockedNumber = async (req, res) => {
 const getBlockedNumbersByUser = async (req, res) => {
   try {
     const { createdBy, drawTime } = req.params;
-    
+
     if (!createdBy || !drawTime) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Created by and draw time are required' 
+      return res.status(400).json({
+        success: false,
+        message: 'Created by and draw time are required'
       });
     }
-    
+
     const blockedNumbers = await BlockNumber.find({
       createdBy,
       drawTime,
       isActive: true
     }).sort({ createdAt: -1 });
-    
+
     res.status(200).json({
       success: true,
       data: blockedNumbers,
       count: blockedNumbers.length
     });
-    
+
   } catch (error) {
     console.error('❌ Error getting blocked numbers by user:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while fetching blocked numbers' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching blocked numbers'
     });
   }
 };
@@ -2655,30 +2697,30 @@ const getBlockedNumbersByUser = async (req, res) => {
 const bulkDeleteBlockedNumbers = async (req, res) => {
   try {
     const { ids } = req.body;
-    
+
     if (!ids || !Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Array of IDs is required' 
+      return res.status(400).json({
+        success: false,
+        message: 'Array of IDs is required'
       });
     }
-    
+
     const result = await BlockNumber.updateMany(
       { _id: { $in: ids } },
       { isActive: false }
     );
-    
+
     res.status(200).json({
       success: true,
       message: `${result.modifiedCount} blocked numbers deleted successfully`,
       modifiedCount: result.modifiedCount
     });
-    
+
   } catch (error) {
     console.error('❌ Error bulk deleting blocked numbers:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while bulk deleting blocked numbers' 
+    res.status(500).json({
+      success: false,
+      message: 'Server error while bulk deleting blocked numbers'
     });
   }
 };
@@ -2699,13 +2741,13 @@ module.exports = {
   deleteEntriesByBillNo,
   updateEntryCount,
   getCountReport,
-  getRateMaster, 
-  setBlockTime, 
+  getRateMaster,
+  setBlockTime,
   getBlockTime,
-  getBlockTimeByType,  
+  getBlockTimeByType,
   deleteUser,
   updateUser,
-  countByNumber, 
+  countByNumber,
   getLatestTicketLimit,
   toggleLoginBlock,
   toggleSalesBlock,
@@ -2714,7 +2756,7 @@ module.exports = {
   getUserRates,
   getWinningReport,
   saveValidEntries,
-  getSalesReport,getBlockedDates, addBlockDate, deleteBlockDate,
+  getSalesReport, getBlockedDates, addBlockDate, deleteBlockDate,
   getAllBlockTimes,
   getusersByid,
   // Block Number functions
@@ -2724,5 +2766,5 @@ module.exports = {
   deleteBlockedNumber,
   getBlockedNumbersByUser,
   bulkDeleteBlockedNumbers,
-  getEntriesWithTimeBlock 
+  getEntriesWithTimeBlock
 };

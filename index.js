@@ -31,7 +31,7 @@ app.get('/get-entries-with-timeblock', Controller.getEntriesWithTimeBlock);
 app.post('/login', Controller.loginUser);
 app.get('/next-bill', Controller.getNextBillNumber);
 app.patch('/invalidateEntry/:id', Controller.invalidateEntry);
-app.delete('/deleteEntryById/:id', Controller.deleteEntryById);
+app.delete('/deleteEntryById/:id/:userType', Controller.deleteEntryById);
 app.delete('/deleteEntriesByBillNo/:billNo', Controller.deleteEntriesByBillNo);
 app.put('/updateEntryCount/:id', Controller.updateEntryCount);
 app.get('/report/count', Controller.getCountReport);
