@@ -1397,13 +1397,15 @@ const netPayMultiday = async (req, res) => {
 
     const results = await Result.find(resultQuery).lean();
     console.log('resultQuery=>>>>>>>>>>>>>>>>', resultQuery);
-    // console.log('results=>>>>>>>>>>>>>>>>', results);
-
-    const resultByDate = {};
+    console.log('results=>>>>>>>>>>>>>>>>', results);
+    
+    const resultByDateTime = {};
     results.forEach(r => {
       const dateStr = new Date(r.date).toISOString().slice(0, 10);
-      resultByDate[dateStr] = r;
+      const normalizedTime = stripSpaceBeforeMeridiem(r.time);
+      resultByDateTime[`${dateStr}_${normalizedTime}`] = r;
     });
+    console.log('resultByDate=>>>>>>>>>>>>>>>', resultByDateTime);
 
     const userRates = await getUserRates(
       agentUsers,
@@ -1414,7 +1416,8 @@ const netPayMultiday = async (req, res) => {
 
     const processedEntries = entries.map(entry => {
       const entryDateStr = entry.date.toISOString().slice(0, 10);
-      const dayResult = resultByDate[entryDateStr] || null;
+      const normalizedLabel = stripSpaceBeforeMeridiem(entry.timeLabel);
+      const dayResult = resultByDateTime[`${entryDateStr}_${normalizedLabel}`] || null;
 
       let normalizedResult = null;
       if (dayResult) {
@@ -1427,9 +1430,10 @@ const netPayMultiday = async (req, res) => {
           others: (dayResult.entries || []).map(e => e.result).filter(Boolean)
         };
       }
+// console.log('normalizedResult=>>>>>>>>>>>>>>>', normalizedResult);
 
       const userRateMap = userRates[entry.createdBy] || {};
-      const normalizedLabel = normalizeDrawLabel(entry.timeLabel);
+      // const normalizedLabel = normalizeDrawLabel(entry.timeLabel);
       const drawRateMap = (isAllTime || isArrayTime)
         ? (userRateMap[normalizedLabel] || {})
         : (userRateMap[time] || {});
@@ -1785,7 +1789,7 @@ const getWinningReport = async (req, res) => {
       const ds = dateObj.toISOString().slice(0, 10);
 
       const dayResult = findDayResult(ds, e.timeLabel);
-      console.log(`\n➡️ Checking entry bill:${e.billNo}, num:${e.number}, type:${e.type}, date:${ds}, time:${e.timeLabel}`);
+      // console.log(`\n➡️ Checking entry bill:${e.billNo}, num:${e.number}, type:${e.type}, date:${ds}, time:${e.timeLabel}`);
       if (!dayResult) {
         console.log("   ❌ No matching result found for this entry.");
         continue;
@@ -1793,7 +1797,7 @@ const getWinningReport = async (req, res) => {
 
       const amount = calculateWinAmount(e, dayResult);
       const winType = computeWinType(e, dayResult);
-      console.log("   ✅ Found result, winAmount:", amount, "winType:", winType);
+      // console.log("   ✅ Found result, winAmount:", amount, "winType:", winType);
 
       if (amount > 0) {
         winningEntries.push({
@@ -1806,7 +1810,7 @@ const getWinningReport = async (req, res) => {
       }
     }
 
-    console.log("✅ Total winning entries:", winningEntries.length);
+    // console.log("✅ Total winning entries:", winningEntries.length);
 
     if (winningEntries.length === 0) {
       console.log("⚠️ No winning entries after evaluation.");
@@ -1838,7 +1842,7 @@ const getWinningReport = async (req, res) => {
     const bills = Object.values(billsMap);
     const grandTotal = bills.reduce((acc, bill) => acc + bill.total, 0);
 
-    console.log("📦 Bills grouped:", bills.length, "GrandTotal:", grandTotal);
+    // console.log("📦 Bills grouped:", bills.length, "GrandTotal:", grandTotal);
 
     return res.json({ fromDate, toDate, time, agent: agent || "All Agents", grandTotal, bills, usersList: users.map(u => u.username) });
   } catch (err) {
