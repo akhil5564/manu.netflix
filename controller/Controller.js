@@ -11,6 +11,7 @@ const BillCounter = require('./model/BillCounter');
 const User = require('./model/MainUser'); // adjust the path to where your MainUser.js is
 const BlockDate = require("./model/BlockDate");
 const BlockNumber = require("./model/BlockNumber");
+const DailyUserLimit = require('./model/DailyUserLimit');
 
 
 
@@ -138,6 +139,7 @@ const deleteBlockDate = async (req, res) => {
 
 // Delete user controller
 const deleteUser = async (req, res) => {
+  console.log('sssssssssssssssssssssssssssssss');
   const { id } = req.params;
 
   if (!id) {
@@ -789,7 +791,7 @@ const invalidateEntry = async (req, res) => {
 const deleteEntryById = async (req, res) => {
   try {
     const { id, userType } = req.params;
-    
+
     const obj = await Entry.findById(id);
     console.log('obj=========', obj)
     const usertype = userType;
@@ -1138,7 +1140,7 @@ const getRateMaster = async (req, res) => {
 const updateEntryCount = async (req, res) => {
   try {
     const { id } = req.params;
-    const { count,userType } = req.body;
+    const { count, userType } = req.body;
 
     if (!count || isNaN(count)) return res.status(400).json({ message: 'Invalid count' });
     const obj = await Entry.findById(id);
@@ -1397,15 +1399,15 @@ const netPayMultiday = async (req, res) => {
 
     const results = await Result.find(resultQuery).lean();
     console.log('resultQuery=>>>>>>>>>>>>>>>>', resultQuery);
-    console.log('results=>>>>>>>>>>>>>>>>', results);
-    
+    // console.log('results=>>>>>>>>>>>>>>>>', results);
+
     const resultByDateTime = {};
     results.forEach(r => {
       const dateStr = new Date(r.date).toISOString().slice(0, 10);
       const normalizedTime = stripSpaceBeforeMeridiem(r.time);
       resultByDateTime[`${dateStr}_${normalizedTime}`] = r;
     });
-    console.log('resultByDate=>>>>>>>>>>>>>>>', resultByDateTime);
+    // console.log('resultByDate=>>>>>>>>>>>>>>>', resultByDateTime);
 
     const userRates = await getUserRates(
       agentUsers,
@@ -1430,7 +1432,7 @@ const netPayMultiday = async (req, res) => {
           others: (dayResult.entries || []).map(e => e.result).filter(Boolean)
         };
       }
-// console.log('normalizedResult=>>>>>>>>>>>>>>>', normalizedResult);
+      // console.log('normalizedResult=>>>>>>>>>>>>>>>', normalizedResult);
 
       const userRateMap = userRates[entry.createdBy] || {};
       // const normalizedLabel = normalizeDrawLabel(entry.timeLabel);
@@ -1600,6 +1602,25 @@ const extractBetType = (typeStr) => {
     return "B";
   } else if (typeStr.includes("-C") || typeStr.endsWith("C")) {
     return "C";
+  }
+
+  // Fallback: extract from parts
+  const parts = typeStr.split("-");
+  return parts[parts.length - 1];
+};
+const extractBetTypeTime = (typeStr) => {
+  // console.log('typeStr', typeStr);
+  if (!typeStr) return "KERALA 3 PM";
+
+  // Handle different patterns: LSK3SUPER, D-1-A, etc.
+  if (typeStr.toUpperCase().includes("LSK3")) {
+    return "KERALA 3 PM";
+  } else if (typeStr.toUpperCase().includes("D-1")) {
+    return "DEAR 1 PM";
+  } else if (typeStr.toUpperCase().includes("D-6")) {
+    return "DEAR 6 PM";
+  } else if (typeStr.toUpperCase().includes("D-8")) {
+    return "DEAR 8 PM";
   }
 
   // Fallback: extract from parts
@@ -1950,6 +1971,44 @@ const countByUsageF = async (date, keys) => {
   }
 };
 
+const countByUserUsageF = async (date, user, keys) => {
+  try {
+    if (!Array.isArray(keys) || !date || !user) {
+      throw new Error('Missing required fields');
+    }
+
+    // keys are already in format TYPE-NUMBER, e.g., BOX-101
+    const typeNumberPairs = keys.map((key) => {
+      const parts = key.split('-');
+      const number = parts.pop(); // last part is number
+      const type = parts.join('-').toUpperCase(); // rest is type
+      return { type, number, key };
+    });
+
+    // Fetch all DailyUserLimit docs for this user/date/type-number combos
+    const docs = await DailyUserLimit.find({
+      date,
+      user,
+      $or: typeNumberPairs.map(t => ({ type: t.type, number: t.number }))
+    }).lean();
+
+    const map = {};
+    typeNumberPairs.forEach(({ type, number, key }) => {
+      const hit = docs.find(d => d.type === type && d.number === number);
+      if (hit && typeof hit.remaining === 'number') {
+        map[key] = { remaining: hit.remaining };
+      } else {
+        map[key] = { remaining: null }; // no record yet → full limit will be used
+      }
+    });
+
+    return map;
+
+  } catch (err) {
+    console.error('❌ countByUserUsageF error:', err);
+    throw err;
+  }
+};
 // Helper function (NOT Express handler anymore)
 const countByNumberF = async (date, timeLabel, keys) => {
   try {
@@ -2056,8 +2115,8 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
 
 const saveValidEntries = async (req, res) => {
   try {
-    const { entries, timeLabel, timeCode, selectedAgent, createdBy, toggleCount, loggedInUserType } = req.body;
-    // console.log('req.body;', req.body)
+    const { entries, timeLabel, timeCode, selectedAgent, createdBy, toggleCount, loggedInUserType, loggedInUser } = req.body;
+    console.log('req.body;', req.body)
     if (!entries || entries.length === 0) {
       return res.status(400).json({ message: 'No entries provided' });
     }
@@ -2133,18 +2192,18 @@ const saveValidEntries = async (req, res) => {
       const rawType = entry.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
       const number = entry.number;
       const key = `${rawType}-${number}`;
-    
+
       const maxLimit = parseInt(allLimits[rawType] || '9999', 10);
       const remainingFromDb = remainingMap[key]?.remaining;  // <-- use key including number
       const allowedCount = typeof remainingFromDb === 'number'
         ? remainingFromDb
         : maxLimit;
-    
+
       if (allowedCount <= 0) {
         exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: maxLimit - allowedCount, added: 0 });
         continue;
       }
-    
+
       if (count <= allowedCount) {
         validEntries.push(entry);
       } else {
@@ -2160,46 +2219,92 @@ const saveValidEntries = async (req, res) => {
       const humanMessage = ['Daily limit reached for:', ...humanLines, '', 'Nothing was saved. Reduce the count and try again.'].join('\n');
       return res.status(400).json({ message: humanMessage });
     }
-    console.log("aaaaaaaaaaaaaaaaaa", validEntries,
-      timeLabel,
-      timeCode,
-      selectedAgent,
-      createdBy,
-      toggleCount,);
-
-    // 6️⃣ Enforce strict limit: if any item exceeds the limit, reject entire save
-    // if (exceededEntries.length > 0) {
-    //   const detailsList = exceededEntries.map(e => {
-    //     const remaining = Math.max(0, (e.limit || 0) - (e.existing || 0));
-    //     return {
-    //       type: e.key,
-    //       limit: e.limit || 0,
-    //       remaining,
-    //       attempted: e.attempted,
-    //       willAdd: e.added || 0,
-    //     };
-    //   });
-
-    //   const humanLines = detailsList.map(d => `${d.type}: remaining ${d.remaining}, attempted ${d.attempted}`);
-    //   const humanMessage = [
-    //     'Daily limit reached for:',
-    //     ...humanLines,
-    //     '',
-    //     'Nothing was saved. Reduce the count and try again.'
-    //   ].join('\n');
-
-    //   return res.status(400).json({
-    //     message: humanMessage,
-    //     exceeded: detailsList
-    //   });
-    // }
 
     if (exceededEntries.length > 0) {
       const humanLines = exceededEntries.map(e => `${e.key} → attempted ${e.attempted}, remaining ${Math.max(0, (e.limit || 0) - (e.existing || 0))}`);
       const humanMessage = ['Daily limit reached for:', ...humanLines, '', 'Nothing was saved. Reduce the count and try again.'].join('\n');
       return res.status(400).json({ message: humanMessage });
     }
-  
+
+
+    const blockedNumbersExceeded = [];
+
+    // 7️⃣ Enforce strict per-user BlockNumber limit
+    for (const entry of validEntries) {
+      const rawTypes = await extractBetType(entry.type)
+      const rawTime = await extractBetTypeTime(entry.type)
+      const number = entry.number;
+      // const block = await BlockNumber.find({createdBy:'4',field:rawTypes});
+      // console.log('block=============', block);
+      // console.log('block=============', entry)
+      console.log('block=============', rawTypes);
+      console.log('block=============', rawTime)
+
+
+      const blocked = await BlockNumber.findOne({
+        field: rawTypes,
+        number,
+        drawTime: rawTime,
+        createdBy: loggedInUser, // the agent/user whose limit we check
+        isActive: true,
+      });
+      console.log('block=============', blocked)
+      if (blocked && blocked.count < entry.count) {
+        blockedNumbersExceeded.push({
+          key: `${rawTypes}-${number}`,
+          attempted: entry.count,
+          remaining: blocked.count
+        });
+      }
+    }
+
+    if (blockedNumbersExceeded.length > 0) {
+      console.log('blockedNumbersExceeded', blockedNumbersExceeded)
+      const message = blockedNumbersExceeded.map(e => `${e.key} → attempted ${e.attempted}, allowed ${e.remaining}`).join('\n');
+      return res.status(400).json({ message: 'User limit exceeded:\n' + message });
+    }
+
+    // Fetch per-user remaining
+    const userRemainingMap = await countByUserUsageF(targetDateStr, loggedInUser, keys);
+    console.log('userRemainingMap====', userRemainingMap)
+
+    // Check per-user daily limit
+    // Check per-user daily limit based on BlockNumber
+    const userExceededEntries = [];
+
+    for (const entry of validEntries) {
+      const rawTypes = await extractBetType(entry.type);
+      const rawTime = await extractBetTypeTime(entry.type);
+      const number = entry.number;
+
+      // Fetch the per-user block number limit
+      const block = await BlockNumber.findOne({
+        field: rawTypes,
+        number,
+        drawTime: rawTime,
+        createdBy: loggedInUser,
+        isActive: true,
+      });
+
+      const maxLimit = block?.count ?? parseInt(allLimits[rawTypes] || '9999', 10); // fallback to general limit
+      const remainingFromDb = typeof userRemainingMap[`${rawTypes}-${number}`]?.remaining === 'number'
+        ? userRemainingMap[`${rawTypes}-${number}`].remaining
+        : maxLimit;
+
+      console.log('userRemainingMap====', remainingFromDb)
+      if (entry.count > remainingFromDb) {
+        userExceededEntries.push({
+          key: `${rawTypes}-${number}`,
+          attempted: entry.count,
+          remaining: remainingFromDb
+        });
+      }
+    }
+    if (userExceededEntries.length > 0) {
+      const humanLines = userExceededEntries.map(e => `${e.key} → attempted ${e.attempted}, remaining ${e.remaining}`);
+      const humanMessage = ['User daily limit reached for:', ...humanLines, '', 'Nothing was saved. Reduce the count and try again.'].join('\n');
+      return res.status(400).json({ message: humanMessage });
+    }
 
 
     const savedBill = await addEntriesF({
@@ -2277,6 +2382,50 @@ const saveValidEntries = async (req, res) => {
     if (ops.length > 0) {
       await DailyLimitUsage.bulkWrite(ops);
     }
+
+    // Per-user daily limit update
+    // Build per-user usage operations strictly using BlockNumber limits
+    const userOps = await Promise.all(
+      validEntries.map(async (entry) => {
+        const rawType = await extractBetType(entry.type);
+        const rawTime = await extractBetTypeTime(entry.type);
+        const number = entry.number;
+        const count = entry.count || 1;
+
+        // Get the strict per-user BlockNumber limit
+        const block = await BlockNumber.findOne({
+          field: rawType,
+          number,
+          drawTime: rawTime,
+          createdBy: loggedInUser,
+          isActive: true
+        });
+
+        const max = block?.count ?? parseInt(allLimits[rawType] || '9999', 10);
+
+        return {
+          updateOne: {
+            filter: { date: targetDateStr, user: loggedInUser, type: rawType, number },
+            update: [
+              {
+                $set: {
+                  remaining: {
+                    $let: {
+                      vars: { curr: '$remaining' },
+                      in: { $max: [0, { $subtract: [{ $ifNull: ['$$curr', max] }, count] }] },
+                    },
+                  },
+                },
+              },
+            ],
+            upsert: true,
+          },
+        };
+      })
+    );
+
+    if (userOps.length > 0) await DailyUserLimit.bulkWrite(userOps);
+
 
     return res.json({ billNo: savedBill.billNo, exceeded: [] });
 
