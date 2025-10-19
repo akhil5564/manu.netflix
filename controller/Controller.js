@@ -1805,14 +1805,14 @@ const getWinningReport = async (req, res) => {
     // --- 5) Evaluate wins ---
     const winningEntries = [];
     for (const e of entries) {
-      // console.log('entries============', entries)
+      // console.log('entries============', e)
       const dateObj = new Date(e.date); // ✅ match frontend behavior
       const ds = dateObj.toISOString().slice(0, 10);
 
       const dayResult = findDayResult(ds, e.timeLabel);
       // console.log(`\n➡️ Checking entry bill:${e.billNo}, num:${e.number}, type:${e.type}, date:${ds}, time:${e.timeLabel}`);
       if (!dayResult) {
-        console.log("   ❌ No matching result found for this entry.");
+        // console.log("   ❌ No matching result found for this entry.");
         continue;
       }
 
@@ -1821,12 +1821,14 @@ const getWinningReport = async (req, res) => {
       // console.log("   ✅ Found result, winAmount:", amount, "winType:", winType);
 
       if (amount > 0) {
+        console.log('entries============', e)
         winningEntries.push({
           ...e,
           date: ds,
           winAmount: amount,
           baseType: extractBetType(e.type),
           winType,
+          name: e.name || "-", 
         });
       }
     }
@@ -1856,6 +1858,7 @@ const getWinningReport = async (req, res) => {
         winType: w.winType,
         count: w.count,
         winAmount: w.winAmount,
+        name: w.name || "-",
       });
       billsMap[w.billNo].total += w.winAmount;
     }
@@ -2100,7 +2103,7 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
       Number(
         e?.total || (e.number.length === 1 ? 12 : 10) * e.count
       ).toFixed(2),
-    timeLabel,
+      timeLabel,
     timeCode,
     createdBy,
     billNo,
@@ -2113,10 +2116,10 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
   return { message: "Entries saved successfully", billNo };
 };
 
-const saveValidEntries = async (req, res) => {
+const saveValidEntries = async (req, res) => {  
   try {
     const { entries, timeLabel, timeCode, selectedAgent, createdBy, toggleCount, loggedInUserType, loggedInUser } = req.body;
-    console.log('req.body;', req.body)
+    console.log('req.body;============', req.body)
     if (!entries || entries.length === 0) {
       return res.status(400).json({ message: 'No entries provided' });
     }
