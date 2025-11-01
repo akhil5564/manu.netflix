@@ -1435,12 +1435,13 @@ const netPayMultiday = async (req, res) => {
       // console.log('normalizedResult=>>>>>>>>>>>>>>>', normalizedResult);
 
       const userRateMap = userRates[entry.createdBy] || {};
-      // const normalizedLabel = normalizeDrawLabel(entry.timeLabel);
+      // Normalize the draw label to match how it's stored in getUserRates
+      const normalizedRateDrawLabel = stripSpaceBeforeMeridiem(normalizeDrawLabel(entry.timeLabel));
       const drawRateMap = (isAllTime || isArrayTime)
-        ? (userRateMap[normalizedLabel] || {})
-        : (userRateMap[time] || {});
+        ? (userRateMap[normalizedRateDrawLabel] || {})
+        : (userRateMap[normalizedLabel] || userRateMap[time] || {});
 
-      const betType = extractBetType(entry.type);
+      const betType = extractBetType(entry.type); 
       const rate = drawRateMap[betType] ?? 10;
       const winAmount = calculateWinAmount(entry, normalizedResult);
 
@@ -1510,14 +1511,25 @@ const netPayMultiday = async (req, res) => {
 //   }
 // }
 async function getUserRates(usernames, time, fromAccountSummary, loggedInUser) {
+  const normalizeDrawForStorage = (drawLabel) => {
+    // Normalize draw label to match entry.timeLabel format
+    let normalized = normalizeDrawLabel(drawLabel); // Maps "LSK 3 PM" -> "KERALA 3 PM"
+    normalized = normalized.replace(/\s+(PM|AM)$/gi, '$1'); // Strip space before PM/AM: "DEAR 1 PM" -> "DEAR 1PM"
+    return normalized;
+  };
+
   // CASE 1: Specific draw
   if (time !== "All") {
     const encodedDraw = time;
 
     if (fromAccountSummary) {
+      // Try both original and normalized draw names
       const adminRateDoc = await RateMaster.findOne({
         user: loggedInUser,
-        draw: encodedDraw
+        $or: [
+          { draw: encodedDraw },
+          { draw: normalizeDrawLabel(encodedDraw) }
+        ]
       });
 
       const adminRates = {};
@@ -1525,14 +1537,19 @@ async function getUserRates(usernames, time, fromAccountSummary, loggedInUser) {
         adminRates[r.label] = r.rate;
       });
 
-      // Apply admin rates to all users
+      // Apply admin rates to all users, store with normalized key
+      const normalizedDrawKey = normalizeDrawForStorage(encodedDraw);
       const ratesMap = {};
-      usernames.forEach(u => (ratesMap[u] = { [encodedDraw]: adminRates }));
+      usernames.forEach(u => (ratesMap[u] = { [normalizedDrawKey]: adminRates }));
       return ratesMap;
     } else {
+      // Try both original and normalized draw names
       const rateDocs = await RateMaster.find({
         user: { $in: usernames },
-        draw: encodedDraw
+        $or: [
+          { draw: encodedDraw },
+          { draw: normalizeDrawLabel(encodedDraw) }
+        ]
       });
 
       const ratesMap = {};
@@ -1540,7 +1557,9 @@ async function getUserRates(usernames, time, fromAccountSummary, loggedInUser) {
         const map = {};
         doc.rates.forEach(r => (map[r.label] = r.rate));
         if (!ratesMap[doc.user]) ratesMap[doc.user] = {};
-        ratesMap[doc.user][doc.draw] = map;
+        // Store with normalized key
+        const normalizedDrawKey = normalizeDrawForStorage(doc.draw);
+        ratesMap[doc.user][normalizedDrawKey] = map;
       });
       return ratesMap;
     }
@@ -1557,7 +1576,9 @@ async function getUserRates(usernames, time, fromAccountSummary, loggedInUser) {
     doc.rates.forEach(r => (map[r.label] = r.rate));
 
     if (!ratesMap[doc.user]) ratesMap[doc.user] = {};
-    ratesMap[doc.user][doc.draw] = map;
+    // Store with normalized key for consistent lookup
+    const normalizedDrawKey = normalizeDrawForStorage(doc.draw);
+    ratesMap[doc.user][normalizedDrawKey] = map;
   });
 
   return ratesMap;
@@ -2647,7 +2668,7 @@ const getSalesReport = async (req, res) => {
     const entries = await Entry.find(entryQuery);
     const last10Entries = await Entry.find({}).sort({ _id: -1 }).limit(2);
     console.log("entrie===========11", entryQuery)
-    console.log("entrie===========12", last10Entries)
+    // console.log("entrie===========12", last10Entries)
     console.log("entrie===========13", entries);
     console.log("📝 Entries fetched (backend):", entries.length);
     if (entries.length > 0) console.log("🔹 Example entry:", entries[0]);
