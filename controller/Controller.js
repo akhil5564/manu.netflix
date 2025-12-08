@@ -1,3 +1,4 @@
+
 const MainUser = require('./model/MainUser');
 const Entry = require('./model/Entry');
 const bcrypt = require('bcryptjs');
@@ -13,6 +14,38 @@ const BlockDate = require("./model/BlockDate");
 const BlockNumber = require("./model/BlockNumber");
 const DailyUserLimit = require('./model/DailyUserLimit');
 
+// =======================
+// 📌 Date Utilities for IST (Indian Standard Time - UTC+5:30)
+// =======================
+
+/**
+ * Parse a date string (YYYY-MM-DD) and create Date object for start of day in IST
+ */
+function parseDateISTStart(dateStr) {
+  if (!dateStr) return null;
+  const [year, month, day] = dateStr.split('-').map(Number);
+  return new Date(year, month - 1, day, 0, 0, 0, 0);
+}
+
+/**
+ * Parse a date string (YYYY-MM-DD) and create Date object for end of day in IST
+ */
+function parseDateISTEnd(dateStr) {
+  if (!dateStr) return null;
+  const [year, month, day] = dateStr.split('-').map(Number);
+  return new Date(year, month - 1, day, 23, 59, 59, 999);
+}
+
+/**
+ * Format a Date object to YYYY-MM-DD string using local time (IST)
+ */
+function formatDateIST(date) {
+  if (!date) return '';
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 
 
 
@@ -78,7 +111,7 @@ const getBlockedDates = async (req, res) => {
 const addBlockDate = async (req, res) => {
   try {
     const { ticket, date } = req.body;
-    console.log('exists1=============', req.body)
+    // console.log('exists1=============', req.body)
 
     if (!ticket || !date) {
       return res.status(400).json({ message: "Ticket and Date are required" });
@@ -105,7 +138,7 @@ const addBlockDate = async (req, res) => {
 
     // Single ticket flow: Prevent duplicate
     const dates = await BlockDate.find({});
-    console.log('exists1=============', dates)
+    // console.log('exists1=============', dates)
     const exists = await BlockDate.findOne({ ticket, date });
     if (exists) {
       return res.status(201).json({ status: 2, message: "Already blocked" });
@@ -139,7 +172,7 @@ const deleteBlockDate = async (req, res) => {
 
 // Delete user controller
 const deleteUser = async (req, res) => {
-  console.log('sssssssssssssssssssssssssssssss');
+  // console.log('sssssssssssssssssssssssssssssss');
   const { id } = req.params;
 
   if (!id) {
@@ -251,7 +284,7 @@ const getBlockTimeByType = async (req, res) => {
     }
 
     const record = await BlockTime.findOne({ drawLabel, type });
-    console.log('Record:==============', record);
+    // console.log('Record:==============', record);
     if (!record) {
       return res.status(404).json({ message: `No block time found for ${drawLabel} (${type})` });
     }
@@ -322,7 +355,7 @@ const countByNumber = async (req, res) => {
       countMap[key] = item.total;
     });
 
-    console.log('✅ Returning counts for date', date, countMap);
+    // console.log('✅ Returning counts for date', date, countMap);
     res.json(countMap);
   } catch (err) {
     console.error('❌ countByNumber error:', err);
@@ -378,7 +411,7 @@ const updateUser = async (req, res) => {
       salesBlocked,
       name
     } = req.body;
-    console.log(' req.body======', req.body)
+    // console.log(' req.body======', req.body)
 
     if (!id) {
       return res.status(400).json({ success: false, message: 'User ID is required' });
@@ -402,7 +435,7 @@ const updateUser = async (req, res) => {
       updateData.password = hashedPassword;
       updateData.nonHashedPassword = password;
     }
-    console.log("updateData", updateData);
+    // console.log("updateData", updateData);
 
     // Update user
     const updatedUser = await MainUser.findByIdAndUpdate(
@@ -591,7 +624,7 @@ const getEntries = async (req, res) => {
 
     // Sort primarily by date, secondarily by createdAt
     const entries = await Entry.find(query).sort({ date: -1, createdAt: -1 });
-    console.log('entries===========', entries)
+    // console.log('entries===========', entries)
     // If loggedInUser exists → adjust rates
     if (loggedInUser && entries.length > 0) {
       // Get unique draws
@@ -684,7 +717,7 @@ const getEntriesWithTimeBlock = async (req, res) => {
 
     // Sort primarily by date, secondarily by createdAt
     const entries = await Entry.find(query).sort({ date: -1, createdAt: -1 });
-    console.log('entries===========', entries)
+    // console.log('entries===========', entries)
     // If loggedInUser exists → adjust rates
     if (loggedInUser && entries.length > 0) {
       // Get unique draws
@@ -793,11 +826,11 @@ const deleteEntryById = async (req, res) => {
     const { id, userType } = req.params;
 
     const obj = await Entry.findById(id);
-    console.log('obj=========', obj)
+    // console.log('obj=========', obj)
     const usertype = userType;
     const timeLabel = obj.timeLabel;
     const blockTimeData = await getBlockTimeF(timeLabel, usertype);
-    console.log('blockTimeData==========', blockTimeData)
+    // console.log('blockTimeData==========', blockTimeData)
     if (!blockTimeData || !blockTimeData.blockTime) {
       return res.status(400).json({ message: 'Block time not found' });
     }
@@ -847,7 +880,7 @@ const deleteEntriesByBillNo = async (req, res) => {
 const saveTicketLimit = async (req, res) => {
   try {
     const { group1, group2, group3, createdBy } = req.body;
-    console.log('req.body=============', req.body);
+    // console.log('req.body=============', req.body);
 
     if (!group1 || !group2 || !group3 || !createdBy) {
       return res.status(400).json({ message: 'Missing data' });
@@ -885,7 +918,7 @@ const getLatestTicketLimit = async (req, res) => {
 const getResult = async (req, res) => {
   try {
     const { date, time } = req.query;
-    console.log('req.query', req.query);
+    // console.log('req.query', req.query);
     if (!time) {
       return res.status(400).json({ message: 'Missing time parameter' });
     }
@@ -901,7 +934,7 @@ const getResult = async (req, res) => {
     const resultDocs = await Result.find(query).lean();
     const resultDoc = await Result.find({}).lean();
     // console.log('resultDoc=>>>>>>>>>>>>>>>>', resultDoc)
-    console.log('resultDoc=>>>>>>>>>>>>>>>>', resultDocs)
+    // console.log('resultDoc=>>>>>>>>>>>>>>>>', resultDocs)
 
     if (!resultDocs || resultDocs.length === 0) {
       return res.status(200).json({ message: 'No results found for given parameters', status: 0 });
@@ -927,7 +960,7 @@ const getResult = async (req, res) => {
       };
     });
 
-    console.log('results=>>>>>>>>>>>>>>>>', results)
+    // console.log('results=>>>>>>>>>>>>>>>>', results)
     return res.status(200).json({ data: results, status: 1, message: 'Result fetched successfully' });
     // return res.json(results); // returns array of result objects for each date
   } catch (error) {
@@ -1070,7 +1103,7 @@ const addEntries = async (req, res) => {
 const saveRateMaster = async (req, res) => {
   try {
     const { user, draw, rates } = req.body;
-    console.log('req.body', req.body)
+    // console.log('req.body', req.body)
 
     if (!user || !draw || !Array.isArray(rates)) {
       return res.status(400).json({ message: "Missing user, draw, or rates" });
@@ -1120,10 +1153,10 @@ const getRateMaster = async (req, res) => {
     } if (draw === "LSK 3 PM") {
       RateMasterQuery.draw = "KERALA 3 PM"
     }
-    console.log('RateMasterQuery', RateMasterQuery)
+    // console.log('RateMasterQuery', RateMasterQuery)
     // const allDocs = await RateMaster.find({}).sort({ _id: -1 }).limit(2);
-    const allDocs = await RateMaster.find({})
-    console.log('All documents:', allDocs);
+    // const allDocs = await RateMaster.find({})
+    // console.log('All documents:', allDocs);
     const rateDoc = await RateMaster.findOne(RateMasterQuery);
     if (!rateDoc) {
       return res.status(200).json({ message: 'No rate found' });
@@ -1144,11 +1177,11 @@ const updateEntryCount = async (req, res) => {
 
     if (!count || isNaN(count)) return res.status(400).json({ message: 'Invalid count' });
     const obj = await Entry.findById(id);
-    console.log('obj=========', obj)
+    // console.log('obj=========', obj)
     const usertype = userType;
     const timeLabel = obj.timeLabel;
     const blockTimeData = await getBlockTimeF(timeLabel, usertype);
-    console.log('blockTimeData==========', blockTimeData)
+    // console.log('blockTimeData==========', blockTimeData)
     if (!blockTimeData || !blockTimeData.blockTime) {
       return res.status(400).json({ message: 'Block time not found' });
     }
@@ -1183,8 +1216,8 @@ const getCountReport = async (req, res) => {
     const query = { isValid: true };
 
     if (date) {
-      const start = new Date(date + 'T00:00:00.000Z');
-      const end = new Date(date + 'T23:59:59.999Z');
+      const start = parseDateISTStart(date);
+      const end = parseDateISTEnd(date);
       query.createdAt = { $gte: start, $lte: end };
     }
 
@@ -1344,8 +1377,8 @@ function normalizeDrawLabel(label) {
   return drawLabelMap[label] || label;
 }
 const netPayMultiday = async (req, res) => {
-  const { fromDate, toDate, time, agent } = req.body;
-  console.log('req.body=>>>>>>>>>>>>>>>>', req.body);
+  const { fromDate, toDate, time, agent,fromAccountSummary,loggedInUser } = req.body;
+  // console.log('req.body=>>>>>>>>>>>>>>>>', req.body);
 
   try {
     const users = await MainUser.find().select("-password -nonHashedPassword");
@@ -1363,8 +1396,8 @@ const netPayMultiday = async (req, res) => {
       ? [agent, ...getAllDescendants(agent, users)]
       : users.map(u => u.username);
 
-    const start = new Date(fromDate + "T00:00:00.000Z");
-    const end = new Date(toDate + "T23:59:59.999Z");
+    const start = parseDateISTStart(fromDate);
+    const end = parseDateISTEnd(toDate);
 
     const isArrayTime = Array.isArray(time);
     const isAllTime = !isArrayTime && (time === 'All' || time === 'ALL');
@@ -1382,7 +1415,31 @@ const netPayMultiday = async (req, res) => {
       }
     }
 
+    // console.log('🔍 Entry Query:', JSON.stringify(entryQuery, null, 2));
+    // console.log('🔍 Agent Users:', agentUsers);
+    // console.log('🔍 Date range (IST):', { 
+    //   start: formatDateIST(start) + ' 00:00:00 IST', 
+    //   end: formatDateIST(end) + ' 23:59:59 IST',
+    //   startUTC: start.toISOString(),
+    //   endUTC: end.toISOString()
+    // });
+
     const entries = await Entry.find(entryQuery);
+    // console.log('📊 Found entries count:', entries.length);
+
+    // If no entries found, let's check what data exists
+    if (entries.length === 0) {
+      // const allEntries = await Entry.find({}).limit(5);
+      // console.log('📋 Sample entries in DB:', allEntries.map(e => ({
+      //   createdBy: e.createdBy,
+      //   timeLabel: e.timeLabel,
+      //   date: e.date,
+      //   number: e.number
+      // })));
+      
+      // const agentEntries = await Entry.find({ createdBy: { $in: agentUsers } }).limit(5);
+      // console.log('👥 Sample entries for agent:', agentEntries.length);
+    }
 
     const stripSpaceBeforeMeridiem = (label) => label.replace(/\s+(PM|AM)$/gi, '$1');
 
@@ -1390,20 +1447,24 @@ const netPayMultiday = async (req, res) => {
 
     if (!isAllTime) {
       if (isArrayTime) {
-        const times = (time || []).map(t => stripSpaceBeforeMeridiem(String(t)));
+        // Normalize draw labels to match how results are stored (e.g., LSK 3 PM -> KERALA 3PM)
+        const times = (time || []).map(t =>
+          stripSpaceBeforeMeridiem(normalizeDrawLabel(String(t)))
+        );
         if (times.length > 0) resultQuery.time = { $in: times };
       } else if (typeof time === 'string' && time.trim().length > 0) {
-        resultQuery.time = stripSpaceBeforeMeridiem(time);
+        // Normalize single draw label as well
+        resultQuery.time = stripSpaceBeforeMeridiem(normalizeDrawLabel(time));
       }
     }
 
     const results = await Result.find(resultQuery).lean();
-    console.log('resultQuery=>>>>>>>>>>>>>>>>', resultQuery);
+    // console.log('resultQuery=>>>>>>>>>>>>>>>>', resultQuery);
     // console.log('results=>>>>>>>>>>>>>>>>', results);
 
     const resultByDateTime = {};
     results.forEach(r => {
-      const dateStr = new Date(r.date).toISOString().slice(0, 10);
+      const dateStr = formatDateIST(new Date(r.date));
       const normalizedTime = stripSpaceBeforeMeridiem(r.time);
       resultByDateTime[`${dateStr}_${normalizedTime}`] = r;
     });
@@ -1415,10 +1476,11 @@ const netPayMultiday = async (req, res) => {
       req.body.fromAccountSummary,
       req.body.loggedInUser
     );
-
+    // console.log('userRates=>>>>>>>>>>>>>>>>', userRates)
     const processedEntries = entries.map(entry => {
-      const entryDateStr = entry.date.toISOString().slice(0, 10);
-      const normalizedLabel = stripSpaceBeforeMeridiem(entry.timeLabel);
+      const entryDateStr = formatDateIST(new Date(entry.date));
+      // Normalize entry draw label to align with result keys (e.g., LSK 3 PM -> KERALA 3PM)
+      const normalizedLabel = stripSpaceBeforeMeridiem(normalizeDrawLabel(entry.timeLabel));
       const dayResult = resultByDateTime[`${entryDateStr}_${normalizedLabel}`] || null;
 
       let normalizedResult = null;
@@ -1435,15 +1497,21 @@ const netPayMultiday = async (req, res) => {
       // console.log('normalizedResult=>>>>>>>>>>>>>>>', normalizedResult);
 
       const userRateMap = userRates[entry.createdBy] || {};
+      // console.log('userRateMap=>>>>>>>>>>>>>>>>', userRateMap);
       // Normalize the draw label to match how it's stored in getUserRates
       const normalizedRateDrawLabel = stripSpaceBeforeMeridiem(normalizeDrawLabel(entry.timeLabel));
+      // console.log('normalizedRateDrawLabel', normalizedRateDrawLabel)
       const drawRateMap = (isAllTime || isArrayTime)
         ? (userRateMap[normalizedRateDrawLabel] || {})
         : (userRateMap[normalizedLabel] || userRateMap[time] || {});
 
       const betType = extractBetType(entry.type); 
+      // console.log('drawRateMap', drawRateMap)
+      // console.log('betType', betType)
       const rate = drawRateMap[betType] ?? 10;
+      // console.log('rate', rate)
       const winAmount = calculateWinAmount(entry, normalizedResult);
+      // console.log('winAmount', winAmount)
 
       return {
         ...entry.toObject(),
@@ -1655,7 +1723,7 @@ function normalizeResultDocs(resultDocs) {
   const grouped = {};
 
   for (const doc of resultDocs) {
-    const ds = new Date(doc.date).toISOString().slice(0, 10);
+    const ds = formatDateIST(new Date(doc.date));
     const key = `${ds}|${doc.time}`;
 
     if (!grouped[key]) {
@@ -1718,13 +1786,13 @@ function getDatesBetween(start, end) {
 // 📌 Fixed getWinningReport
 // =======================
 function formatDate(date) {
-  return date.toISOString().slice(0, 10);
+  return formatDateIST(date);
 }
 const getWinningReport = async (req, res) => {
   try {
     const { fromDate, toDate, time, agent } = req.body;
-    console.log("\n==============================");
-    console.log("📥 getWinningReport request:", req.body);
+    // console.log("\n==============================");
+    // console.log("📥 getWinningReport request:", req.body);
 
     if (!fromDate || !toDate || !time) {
       return res.status(400).json({ message: "fromDate, toDate, and time are required" });
@@ -1752,9 +1820,14 @@ const getWinningReport = async (req, res) => {
     users.forEach(u => { userSchemeMap[u.username] = u.scheme || "N/A"; });
 
     // --- 2) Date range ---
-    const start = new Date(fromDate + "T00:00:00.000Z");
-    const end = new Date(toDate + "T23:59:59.999Z");
-    console.log("📅 Date Range:", start, "to", end);
+    const start = parseDateISTStart(fromDate);
+    const end = parseDateISTEnd(toDate);
+    // console.log("📅 Date Range (IST):", { 
+    //   start: formatDateIST(start) + ' 00:00:00 IST', 
+    //   end: formatDateIST(end) + ' 23:59:59 IST',
+    //   startUTC: start.toISOString(),
+    //   endUTC: end.toISOString()
+    // });
 
     // --- 3) Entries ---
     const entryQuery = {
@@ -1765,19 +1838,19 @@ const getWinningReport = async (req, res) => {
     if (time !== "ALL") entryQuery.timeLabel = time;
 
     const entries = await Entry.find(entryQuery).lean();
-    console.log("📝 Entries fetched:", entries.length);
-    if (entries.length > 0) {
-      console.log("🔹 Example entry:", entries[0]);
-    }
+    // console.log("📝 Entries fetched:", entries.length);
+    // if (entries.length > 0) {
+    //   console.log("🔹 Example entry:", entries[0]);
+    // }
 
     if (entries.length === 0) {
-      console.log("⚠️ No entries found.");
+      // console.log("⚠️ No entries found.");
       return res.json({ message: "No entries found", bills: [], grandTotal: 0 });
     }
 
     // --- 4) Results ---
     const allDates = getDatesBetween(new Date(fromDate), new Date(toDate))
-      .map(d => d.toISOString().slice(0, 10)); // ['2025-08-20', '2025-08-21', ...]
+      .map(d => formatDateIST(d)); // ['2025-08-20', '2025-08-21', ...]
 
     const resultQuery = { date: { $in: allDates } };
     const normalizedTime = parseTimeValue(time);
@@ -1785,8 +1858,8 @@ const getWinningReport = async (req, res) => {
       resultQuery.time = normalizedTime;
     }
     const resultDocs = await Result.find(resultQuery).lean();
-    console.log('resultQuery', resultQuery)
-    console.log("🏆 Results fetched:==", resultDocs.length);
+    // console.log('resultQuery', resultQuery)
+    // console.log("🏆 Results fetched:==", resultDocs.length);
     // console.log("🏆 Results fetched:==", resultDocs);
 
 
@@ -1806,7 +1879,7 @@ const getWinningReport = async (req, res) => {
       const list = resultsByTime[normalizedTime] || [];
       // console.log('list==========', list);
       const found = [...list].reverse().find(r => {
-        const rd = new Date(r.date).toISOString().slice(0, 10);
+        const rd = formatDateIST(new Date(r.date));
         return rd === dateStr;
       });
       if (!found) return null;
@@ -1828,7 +1901,7 @@ const getWinningReport = async (req, res) => {
     for (const e of entries) {
       // console.log('entries============', e)
       const dateObj = new Date(e.date); // ✅ match frontend behavior
-      const ds = dateObj.toISOString().slice(0, 10);
+      const ds = formatDateIST(dateObj);
 
       const dayResult = findDayResult(ds, e.timeLabel);
       // console.log(`\n➡️ Checking entry bill:${e.billNo}, num:${e.number}, type:${e.type}, date:${ds}, time:${e.timeLabel}`);
@@ -1842,7 +1915,7 @@ const getWinningReport = async (req, res) => {
       // console.log("   ✅ Found result, winAmount:", amount, "winType:", winType);
 
       if (amount > 0) {
-        console.log('entries============', e)
+        // console.log('entries============', e)
         winningEntries.push({
           ...e,
           date: ds,
@@ -1857,7 +1930,7 @@ const getWinningReport = async (req, res) => {
     // console.log("✅ Total winning entries:", winningEntries.length);
 
     if (winningEntries.length === 0) {
-      console.log("⚠️ No winning entries after evaluation.");
+      // console.log("⚠️ No winning entries after evaluation.");
       return res.json({ message: "No winning entries found", bills: [], grandTotal: 0 });
     }
 
@@ -1910,7 +1983,7 @@ async function getBlockTimeF(drawLabel, loggedInUserType) {
   const records = await BlockTime.find({});
   // console.log('records=============', records)
   // console.log('drawLabel=============', drawLabel)
-  console.log('loggedInUserType=============', loggedInUserType)
+  // console.log('loggedInUserType=============', loggedInUserType)
   // Normalize incoming label to improve matching (e.g., "LSK 3 PM" -> "LSK3")
 
 
@@ -1920,7 +1993,7 @@ async function getBlockTimeF(drawLabel, loggedInUserType) {
   let record = await BlockTime.findOne({ drawLabel: originalLabel, type: loggedInUserType });
   // let record2 = await BlockTime.find({});
   // console.log('record2=============', record2);
-  console.log('record=============', normalizedLabel)
+  // console.log('record=============', normalizedLabel)
 
   if (!record) {
     // Try normalized (space/AM/PM removed, uppercased)
@@ -1934,7 +2007,7 @@ async function getBlockTimeF(drawLabel, loggedInUserType) {
   }
 
   if (!record) return null;
-  console.log('record=============', record)
+  // console.log('record=============', record)
   return {
     blockTime: record.blockTime,
     unblockTime: record.unblockTime
@@ -1976,8 +2049,8 @@ const countByUsageF = async (date, keys) => {
       $or: typeNumberPairs.map((t) => ({ type: t.type, number: t.number }))
     }).lean();
 
-    console.log('docs=============', docs)
-    console.log('typeNumberPairs=============', typeNumberPairs)
+    // console.log('docs=============', docs)
+    // console.log('typeNumberPairs=============', typeNumberPairs)
     const map = {};
     typeNumberPairs.forEach(({ type, number, key }) => {
       const hit = docs.find((d) => d.type === type && d.number === number);
@@ -1987,7 +2060,7 @@ const countByUsageF = async (date, keys) => {
         map[key] = { remaining: null }; // no record yet → full limit will be used
       }
     });
-    console.log('map=============', map)
+    // console.log('map=============', map)
     return map;
   } catch (err) {
     console.error('❌ countByUsageF error:', err);
@@ -2061,9 +2134,9 @@ const countByNumberF = async (date, timeLabel, keys) => {
       };
     });
 
-    // Build start/end of day range for Date-typed 'date' field
-    const start = new Date(`${date}T00:00:00.000Z`);
-    const end = new Date(`${date}T23:59:59.999Z`);
+    // Build start/end of day range for Date-typed 'date' field (IST)
+    const start = parseDateISTStart(date);
+    const end = parseDateISTEnd(date);
 
     // Run aggregation with date range
     const results = await Entry.aggregate([
@@ -2110,7 +2183,7 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
   if (!entries || entries.length === 0) {
     throw new Error("No entries provided");
   }
-  console.log('date=============', date)
+  // console.log('date=============', date)
   if (!date) {
     throw new Error("Date is required");
   }
@@ -2140,12 +2213,12 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCoun
 const saveValidEntries = async (req, res) => {  
   try {
     const { entries, timeLabel, timeCode, selectedAgent, createdBy, toggleCount, loggedInUserType, loggedInUser } = req.body;
-    console.log('req.body;============', req.body)
+    // console.log('req.body;============', req.body)
     if (!entries || entries.length === 0) {
       return res.status(400).json({ message: 'No entries provided' });
     }
     const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
+    const todayStr = formatDateIST(now);
     const normalizedLabel = normalizeDrawLabelLimit(timeLabel);
     // console.log('normalizedLabel==============', normalizedLabel);
     // console.log('todayStr==============', todayStr)
@@ -2186,7 +2259,7 @@ const saveValidEntries = async (req, res) => {
     if (now >= unblock) {
       targetDateObj.setDate(targetDateObj.getDate() + 1);
     }
-    const targetDateStr = targetDateObj.toISOString().split('T')[0];
+    const targetDateStr = formatDateIST(targetDateObj);
 
     // 2️⃣ Fetch ticket limits
     const limits = await getTicketLimits();
@@ -2235,7 +2308,7 @@ const saveValidEntries = async (req, res) => {
         exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: maxLimit - allowedCount, added: allowedCount });
       }
     }
-    console.log('exceededEntries=============', exceededEntries)
+    // console.log('exceededEntries=============', exceededEntries)
 
     if (validEntries.length === 0) {
       // return res.status(400).json({ message: 'All entries exceed allowed limits', exceeded: exceededEntries });
@@ -2261,8 +2334,8 @@ const saveValidEntries = async (req, res) => {
       // const block = await BlockNumber.find({createdBy:'4',field:rawTypes});
       // console.log('block=============', block);
       // console.log('block=============', entry)
-      console.log('block=============', rawTypes);
-      console.log('block=============', rawTime)
+      // console.log('block=============', rawTypes);
+      // console.log('block=============', rawTime)
 
 
       const blocked = await BlockNumber.findOne({
@@ -2272,7 +2345,7 @@ const saveValidEntries = async (req, res) => {
         createdBy: loggedInUser, // the agent/user whose limit we check
         isActive: true,
       });
-      console.log('block=============', blocked)
+      // console.log('block=============', blocked)
       if (blocked && blocked.count < entry.count) {
         blockedNumbersExceeded.push({
           key: `${rawTypes}-${number}`,
@@ -2283,14 +2356,14 @@ const saveValidEntries = async (req, res) => {
     }
 
     if (blockedNumbersExceeded.length > 0) {
-      console.log('blockedNumbersExceeded', blockedNumbersExceeded)
+      // console.log('blockedNumbersExceeded', blockedNumbersExceeded)
       const message = blockedNumbersExceeded.map(e => `${e.key} → attempted ${e.attempted}, allowed ${e.remaining}`).join('\n');
       return res.status(400).json({ message: 'User limit exceeded:\n' + message });
     }
 
     // Fetch per-user remaining
     const userRemainingMap = await countByUserUsageF(targetDateStr, loggedInUser, keys);
-    console.log('userRemainingMap====', userRemainingMap)
+    // console.log('userRemainingMap====', userRemainingMap)
 
     // Check per-user daily limit
     // Check per-user daily limit based on BlockNumber
@@ -2315,7 +2388,7 @@ const saveValidEntries = async (req, res) => {
         ? userRemainingMap[`${rawTypes}-${number}`].remaining
         : maxLimit;
 
-      console.log('userRemainingMap====', remainingFromDb)
+      // console.log('userRemainingMap====', remainingFromDb)
       if (entry.count > remainingFromDb) {
         userExceededEntries.push({
           key: `${rawTypes}-${number}`,
@@ -2340,7 +2413,7 @@ const saveValidEntries = async (req, res) => {
       toggleCount,
       date: targetDateStr
     });
-    console.log('savedBill', savedBill)
+    // console.log('savedBill', savedBill)
 
     // 8️⃣ Upsert DailyLimitUsage remaining per (date,type,number)
     // We must decrement remaining by saved counts, initializing with TicketLimit on first write
@@ -2644,7 +2717,7 @@ const getSalesReport = async (req, res) => {
   try {
     const { fromDate, toDate, createdBy, timeLabel, loggedInUser } = req.query;
 
-    console.log("📥 getSalesReport request:", req.query);
+    // console.log("📥 getSalesReport request:", req.query);
 
     // 1️⃣ Build agent list (loggedInUser or createdBy + descendants)
     const allUsers = await MainUser.find().select("username createdBy");
@@ -2654,7 +2727,7 @@ const getSalesReport = async (req, res) => {
     } else {
       agentList = [createdBy, ...getDescendants(createdBy, allUsers)];
     }
-    console.log("👥 Agent Users (backend):", agentList);
+    // console.log("👥 Agent Users (backend):", agentList);
 
     // 2️⃣ Build query for entries
     const entryQuery = {
@@ -2667,21 +2740,21 @@ const getSalesReport = async (req, res) => {
 
     const entries = await Entry.find(entryQuery);
     const last10Entries = await Entry.find({}).sort({ _id: -1 }).limit(2);
-    console.log("entrie===========11", entryQuery)
+    // console.log("entrie===========11", entryQuery)
     // console.log("entrie===========12", last10Entries)
-    console.log("entrie===========13", entries);
-    console.log("📝 Entries fetched (backend):", entries.length);
-    if (entries.length > 0) console.log("🔹 Example entry:", entries[0]);
+    // console.log("entrie===========13", entries);
+    // console.log("📝 Entries fetched (backend):", entries.length);
+    // if (entries.length > 0) console.log("🔹 Example entry:", entries[0]);
 
     // 3️⃣ Fetch RateMaster for each draw
     const userForRate = loggedInUser;
 
-    console.log('userForRate===========', userForRate)
-    console.log('timeLabel===========', timeLabel)
+    // console.log('userForRate===========', userForRate)
+    // console.log('timeLabel===========', timeLabel)
 
     // Get unique draws from entries
     const uniqueDraws = [...new Set(entries.map(entry => entry.timeLabel))];
-    console.log('uniqueDraws===========', uniqueDraws);
+    // console.log('uniqueDraws===========', uniqueDraws);
 
     // Fetch rate masters for each draw
     const rateMastersByDraw = {};
@@ -2694,9 +2767,9 @@ const getSalesReport = async (req, res) => {
         rateMasterQuery.draw = draw;
       }
 
-      console.log(`rateMasterQuery for ${draw}:`, rateMasterQuery);
+      // console.log(`rateMasterQuery for ${draw}:`, rateMasterQuery);
       const rateMaster = await RateMaster.findOne(rateMasterQuery);
-      console.log(`rateMaster for ${draw}:`, rateMaster);
+      // console.log(`rateMaster for ${draw}:`, rateMaster);
 
       const rateLookup = {};
       (rateMaster?.rates || []).forEach(r => {
@@ -2705,7 +2778,7 @@ const getSalesReport = async (req, res) => {
       rateMastersByDraw[draw] = rateLookup;
     }
 
-    console.log("💰 Rate masters by draw:", rateMastersByDraw);
+    // console.log("💰 Rate masters by draw:", rateMastersByDraw);
 
     // Helper: extract bet type
     const extractBetType = (typeStr) => {
@@ -2747,7 +2820,7 @@ const getSalesReport = async (req, res) => {
       const rateLookup = rateMastersByDraw[draw] || {};
       const rate = rateLookup[betType] ?? 10;
 
-      console.log(`Entry: ${entry.type}, Draw: ${draw}, BetType: ${betType}, Rate: ${rate}, Count: ${count}`);
+      // console.log(`Entry: ${entry.type}, Draw: ${draw}, BetType: ${betType}, Rate: ${rate}, Count: ${count}`);
 
       totalCount += count;
       totalSales += count * rate;
@@ -2778,7 +2851,7 @@ const getSalesReport = async (req, res) => {
       byAgent,
     };
 
-    console.log("✅ Final Sales Report (backend):", report);
+    // console.log("✅ Final Sales Report (backend):", report);
     res.json(report);
 
   } catch (err) {
@@ -2811,7 +2884,7 @@ function getDescendants(user, allUsers = []) {
 const getBlockedNumbers = async (req, res) => {
   try {
     const { createdBy, group, drawTime, isActive = true } = req.query;
-    console.log("aaaaaaaaaaaaaaaaaa2", req.query);
+    // console.log("aaaaaaaaaaaaaaaaaa2", req.query);
 
     const query = { isActive: isActive === 'true' };
 
@@ -2841,7 +2914,7 @@ const getBlockedNumbers = async (req, res) => {
 const addBlockedNumbers = async (req, res) => {
   try {
     const { blockData, selectedGroup, drawTime, createdBy } = req.body;
-    console.log("aaaaaaaaaaaaaaaaaaa1", blockData);
+    // console.log("aaaaaaaaaaaaaaaaaaa1", blockData);
 
     if (!blockData || !Array.isArray(blockData) || blockData.length === 0) {
       return res.status(400).json({
@@ -2850,9 +2923,9 @@ const addBlockedNumbers = async (req, res) => {
       });
     }
 
-    console.log('selectedGroup', selectedGroup)
-    console.log('drawTime', drawTime)
-    console.log('createdBy', createdBy);
+    // console.log('selectedGroup', selectedGroup)
+    // console.log('drawTime', drawTime)
+    // console.log('createdBy', createdBy);
     if (!selectedGroup || !drawTime || !createdBy) {
       return res.status(400).json({
         success: false,
@@ -2889,7 +2962,7 @@ const addBlockedNumbers = async (req, res) => {
       }));
     }
 
-    console.log('numbersToBlock', numbersToBlock);
+    // console.log('numbersToBlock', numbersToBlock);
     // Check for existing blocked numbers to avoid duplicates
     const existingNumbers = await BlockNumber.find({
       createdBy,
@@ -2900,7 +2973,7 @@ const addBlockedNumbers = async (req, res) => {
         number: item.number
       }))
     });
-    console.log('existingNumbers', existingNumbers);
+    // console.log('existingNumbers', existingNumbers);
     if (existingNumbers.length > 0) {
       const duplicates = existingNumbers.map(item => `${item.field}: ${item.number} (${item.drawTime})`);
       return res.status(200).json({
@@ -2913,7 +2986,7 @@ const addBlockedNumbers = async (req, res) => {
 
     // Insert new blocked numbers
     const savedNumbers = await BlockNumber.insertMany(numbersToBlock);
-    console.log('savedNumbers====', savedNumbers)
+    // console.log('savedNumbers====', savedNumbers)
 
     res.status(201).json({
       success: true,
