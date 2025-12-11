@@ -1579,6 +1579,13 @@ const netPayMultiday = async (req, res) => {
 //   }
 // }
 async function getUserRates(usernames, time, fromAccountSummary, loggedInUser) {
+  // Log function entry always
+  console.log('🔵 getUserRates called with:');
+  console.log('  - time:', time);
+  console.log('  - fromAccountSummary:', fromAccountSummary);
+  console.log('  - loggedInUser:', loggedInUser);
+  console.log('  - usernames:', usernames);
+
   const normalizeDrawForStorage = (drawLabel) => {
     // Normalize draw label to match entry.timeLabel format
     let normalized = normalizeDrawLabel(drawLabel); // Maps "LSK 3 PM" -> "KERALA 3 PM"
@@ -1590,28 +1597,14 @@ async function getUserRates(usernames, time, fromAccountSummary, loggedInUser) {
   if (time !== "All") {
     const encodedDraw = time;
 
+    console.log('✅ Processing specific draw:', encodedDraw);
+    console.log('fromAccountSummary=>>>>>>>>>>>>>>>>', fromAccountSummary)
+    console.log('loggedInUser=>>>>>>>>>>>>>>>>', loggedInUser)
+    console.log('usernames=>>>>>>>>>>>>>>>>', usernames)
+    
     if (fromAccountSummary) {
-      // Try both original and normalized draw names
-      const adminRateDoc = await RateMaster.findOne({
-        user: loggedInUser,
-        $or: [
-          { draw: encodedDraw },
-          { draw: normalizeDrawLabel(encodedDraw) }
-        ]
-      });
-
-      const adminRates = {};
-      (adminRateDoc?.rates || []).forEach(r => {
-        adminRates[r.label] = r.rate;
-      });
-
-      // Apply admin rates to all users, store with normalized key
-      const normalizedDrawKey = normalizeDrawForStorage(encodedDraw);
-      const ratesMap = {};
-      usernames.forEach(u => (ratesMap[u] = { [normalizedDrawKey]: adminRates }));
-      return ratesMap;
-    } else {
-      // Try both original and normalized draw names
+      // Find rates for each user in usernames
+      console.log('  📋 Finding rates for each user:', usernames);
       const rateDocs = await RateMaster.find({
         user: { $in: usernames },
         $or: [
@@ -1630,24 +1623,76 @@ async function getUserRates(usernames, time, fromAccountSummary, loggedInUser) {
         ratesMap[doc.user][normalizedDrawKey] = map;
       });
       return ratesMap;
+    } else {
+      // Find rates only for loggedInUser, then apply to all users
+      console.log('  📋 Finding rates only for loggedInUser:', loggedInUser);
+      const adminRateDoc = await RateMaster.findOne({
+        user: loggedInUser,
+        $or: [
+          { draw: encodedDraw },
+          { draw: normalizeDrawLabel(encodedDraw) }
+        ]
+      });
+
+      const adminRates = {};
+      (adminRateDoc?.rates || []).forEach(r => {
+        adminRates[r.label] = r.rate;
+      });
+
+      // Apply admin rates to all users, store with normalized key
+      const normalizedDrawKey = normalizeDrawForStorage(encodedDraw);
+      const ratesMap = {};
+      usernames.forEach(u => (ratesMap[u] = { [normalizedDrawKey]: adminRates }));
+      return ratesMap;
     }
   }
 
   // CASE 2: All draws
-  const rateDocs = await RateMaster.find({
-    user: { $in: usernames }
-  });
+  console.log('✅ Processing all draws (time === "All")');
+  
+  let rateDocs;
+  if (fromAccountSummary) {
+    // Find rates for each user in usernames
+    console.log('  📋 Finding rates for each user:', usernames);
+    rateDocs = await RateMaster.find({
+      user: { $in: usernames }
+    });
+  } else {
+    // Find rates only for loggedInUser, then apply to all users
+    console.log('  📋 Finding rates only for loggedInUser:', loggedInUser);
+    rateDocs = await RateMaster.find({
+      user: loggedInUser
+    });
+  }
 
   const ratesMap = {};
-  rateDocs.forEach(doc => {
-    const map = {};
-    doc.rates.forEach(r => (map[r.label] = r.rate));
+  
+  if (fromAccountSummary) {
+    // Store rates for each user separately
+    rateDocs.forEach(doc => {
+      const map = {};
+      doc.rates.forEach(r => (map[r.label] = r.rate));
 
-    if (!ratesMap[doc.user]) ratesMap[doc.user] = {};
-    // Store with normalized key for consistent lookup
-    const normalizedDrawKey = normalizeDrawForStorage(doc.draw);
-    ratesMap[doc.user][normalizedDrawKey] = map;
-  });
+      if (!ratesMap[doc.user]) ratesMap[doc.user] = {};
+      // Store with normalized key for consistent lookup
+      const normalizedDrawKey = normalizeDrawForStorage(doc.draw);
+      ratesMap[doc.user][normalizedDrawKey] = map;
+    });
+  } else {
+    // Apply loggedInUser rates to all users in usernames
+    const adminRatesByDraw = {};
+    rateDocs.forEach(doc => {
+      const map = {};
+      doc.rates.forEach(r => (map[r.label] = r.rate));
+      const normalizedDrawKey = normalizeDrawForStorage(doc.draw);
+      adminRatesByDraw[normalizedDrawKey] = map;
+    });
+    
+    // Apply admin rates to all users
+    usernames.forEach(u => {
+      ratesMap[u] = { ...adminRatesByDraw };
+    });
+  }
 
   return ratesMap;
 }
