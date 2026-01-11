@@ -624,9 +624,9 @@ const getEntries = async (req, res) => {
 
     // Sort primarily by date, secondarily by createdAt
     const entries = await Entry.find(query).sort({ date: -1, createdAt: -1 });
-    // console.log('entries===========', entries)
+    // console.log('entries===========', entries) 
     // If loggedInUser exists → adjust rates
-    if (loggedInUser && entries.length > 0) {
+    if (loggedInUser && entries.length > 0) { 
       // Get unique draws
       const uniqueDraws = [...new Set(entries.map(e => e.timeLabel))];
 
@@ -1382,7 +1382,10 @@ const netPayMultiday = async (req, res) => {
 
   try {
     const users = await MainUser.find().select("-password -nonHashedPassword");
-
+    const userSchemeMap = {};
+    users.forEach(u => {
+      userSchemeMap[u.username] = u.scheme || "Scheme 1";
+    });
     function getAllDescendants(username, usersList, visited = new Set()) {
       if (visited.has(username)) return [];
       visited.add(username);
@@ -1505,17 +1508,21 @@ const netPayMultiday = async (req, res) => {
         ? (userRateMap[normalizedRateDrawLabel] || {})
         : (userRateMap[normalizedLabel] || userRateMap[time] || {});
 
-      const betType = extractBetType(entry.type); 
+      const betType = extractBetType(entry.type);
       // console.log('drawRateMap', drawRateMap)
       // console.log('betType', betType)
       const rate = drawRateMap[betType] ?? 10;
       // console.log('rate', rate)
       const winAmount = calculateWinAmount(entry, normalizedResult);
       // console.log('winAmount', winAmount)
+      const winType = computeWinType(entry, normalizedResult);
+      // console.log('winType', winType)
 
       return {
         ...entry.toObject(),
         winAmount,
+        winType,
+        scheme: userSchemeMap[entry.createdBy] || "Scheme 1",
         appliedRate: rate,
         calculatedAmount: rate * (Number(entry.count) || 0),
         date: entryDateStr
@@ -1878,7 +1885,7 @@ const getWinningReport = async (req, res) => {
     const entryQuery = {
       createdBy: { $in: agentUsers },
       isValid: true,
-      createdAt: { $gte: start, $lte: end },   // ✅ use createdAt instead of date
+      date: { $gte: start, $lte: end },   // ✅ use date field like netPayMultiday
     };
     if (time !== "ALL") entryQuery.timeLabel = time;
 
