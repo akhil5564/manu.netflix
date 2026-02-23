@@ -1076,20 +1076,6 @@ const invalidateEntry = async (req, res) => {
       return res.status(404).json({ message: 'Entry not found' });
     }
 
-    // 🟢 Update SalesReportSummary incrementally (decrement for invalid entry)
-    const oldCount = Number(updated.count) || 0;
-    const oldRate = Number(updated.rate || (updated.number.length === 1 ? 12 : 10) * oldCount);
-    const countDelta = -oldCount;
-    const amountDelta = -oldRate;
-    const scheme = extractBaseType(updated.type);
-    const dateStr = formatDateIST(new Date(updated.createdAt)); // 🔑 Use createdAt (transaction date)
-
-    await updateSummaryDelta(updated.createdBy, dateStr, updated.timeLabel, scheme, countDelta, amountDelta);
-
-    // 🟢 Clear caches to ensure immediate update in reports
-    entriesCache.clear();
-    reportCache.clear();
-
     res.status(200).json({ message: 'Marked as invalid' });
   } catch (err) {
     console.error('[INVALIDATE ENTRY ERROR]', err);
@@ -1102,13 +1088,11 @@ const deleteEntryById = async (req, res) => {
     const { id, userType } = req.params;
 
     const obj = await Entry.findById(id);
-    if (!obj) {
-      return res.status(404).json({ message: 'Entry not found' });
-    }
-
+    // console.log('obj=========', obj)
     const usertype = userType;
     const timeLabel = obj.timeLabel;
     const blockTimeData = await getBlockTimeF(timeLabel, usertype);
+    // console.log('blockTimeData==========', blockTimeData)
     if (!blockTimeData || !blockTimeData.blockTime) {
       return res.status(400).json({ message: 'Block time not found' });
     }
@@ -1123,23 +1107,11 @@ const deleteEntryById = async (req, res) => {
     if (now >= block) {
       return res.status(400).json({ message: 'Cannot delete entry, Entry time is blocked for this draw' });
     }
-
-    // 🟢 Update SalesReportSummary incrementally (before deletion)
-    const oldCount = Number(obj.count) || 0;
-    const oldRate = Number(obj.rate || (obj.number.length === 1 ? 12 : 10) * oldCount);
-
-    const countDelta = -oldCount;
-    const amountDelta = -oldRate;
-    const scheme = extractBaseType(obj.type);
-    const dateStr = formatDateIST(new Date(obj.createdAt)); // 🔑 Use createdAt (transaction date)
-
-    await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
-
     const deletedEntry = await Entry.findByIdAndDelete(id);
 
-    // 🟢 Clear caches to ensure immediate update in reports
-    entriesCache.clear();
-    reportCache.clear();
+    if (!deletedEntry) {
+      return res.status(404).json({ message: 'Entry not found' });
+    }
 
     res.status(200).json({ message: 'Entry deleted successfully' });
   } catch (err) {
@@ -1154,29 +1126,10 @@ const deleteEntriesByBillNo = async (req, res) => {
   try {
     const { billNo } = req.params;
 
-    const entriesToDelete = await Entry.find({ billNo });
-    if (entriesToDelete.length === 0) {
+    const result = await Entry.deleteMany({ billNo });
+    if (result.deletedCount === 0) {
       return res.status(404).json({ message: 'No entries found with this bill number' });
     }
-
-    // 🟢 Update SalesReportSummary incrementally for each entry before deletion
-    for (const obj of entriesToDelete) {
-      const oldCount = Number(obj.count) || 0;
-      const oldRate = Number(obj.rate || (obj.number.length === 1 ? 12 : 10) * oldCount);
-
-      const countDelta = -oldCount;
-      const amountDelta = -oldRate;
-      const scheme = extractBaseType(obj.type);
-      const dateStr = formatDateIST(new Date(obj.createdAt)); // 🔑 Use createdAt (transaction date)
-
-      await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
-    }
-
-    await Entry.deleteMany({ billNo });
-
-    // 🟢 Clear caches to ensure immediate update in reports
-    entriesCache.clear();
-    reportCache.clear();
 
     res.status(200).json({ message: 'Entries deleted successfully' });
   } catch (err) {
@@ -1449,10 +1402,6 @@ const addEntries = async (req, res) => {
     const transactionDateStr = formatDateIST(new Date());
     await updateAutomaticSummary(createdBy, transactionDateStr, timeLabel, timeCode, toSave);
 
-    // 🟢 Clear caches to ensure immediate update in reports
-    entriesCache.clear();
-    reportCache.clear();
-
     res.status(200).json({ message: 'Entries saved successfully', billNo });
   } catch (error) {
     console.error('[SAVE ENTRY ERROR]', error);
@@ -1542,11 +1491,11 @@ const updateEntryCount = async (req, res) => {
 
     if (!count || isNaN(count)) return res.status(400).json({ message: 'Invalid count' });
     const obj = await Entry.findById(id);
-    if (!obj) return res.status(404).json({ message: 'Entry not found' });
-
+    // console.log('obj=========', obj)
     const usertype = userType;
     const timeLabel = obj.timeLabel;
     const blockTimeData = await getBlockTimeF(timeLabel, usertype);
+    // console.log('blockTimeData==========', blockTimeData)
     if (!blockTimeData || !blockTimeData.blockTime) {
       return res.status(400).json({ message: 'Block time not found' });
     }
@@ -1561,26 +1510,8 @@ const updateEntryCount = async (req, res) => {
     if (now >= block) {
       return res.status(400).json({ message: 'Cannot update count, Entry time is blocked for this draw' });
     }
-
-    const oldCount = Number(obj.count) || 1;
-    const oldRate = Number(obj.rate || (obj.number.length === 1 ? 12 : 10) * oldCount);
-    const unitRate = oldRate / oldCount;
-    const newCount = parseInt(count);
-    const newRate = Number((newCount * unitRate).toFixed(2));
-
-    const updated = await Entry.findByIdAndUpdate(id, { count: newCount, rate: newRate }, { new: true });
-
-    // 🟢 Update SalesReportSummary incrementally
-    const countDelta = newCount - oldCount;
-    const amountDelta = newRate - oldRate;
-    const scheme = extractBaseType(obj.type);
-    const dateStr = formatDateIST(new Date(obj.createdAt)); // 🔑 Use createdAt (transaction date)
-
-    await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
-
-    // 🟢 Clear caches to ensure immediate update in reports
-    entriesCache.clear();
-    reportCache.clear();
+    const updated = await Entry.findByIdAndUpdate(id, { count: parseInt(count) }, { new: true });
+    if (!updated) return res.status(404).json({ message: 'Entry not found' });
 
     res.status(200).json({ message: 'Count updated successfully', entry: updated });
   } catch (err) {
@@ -2598,77 +2529,41 @@ const normalizeDrawLabelLimit = (label) => {
     .trim();
 };
 
-// async function getBlockTimeF(drawLabel, loggedInUserType) {
-//   if (!drawLabel || !loggedInUserType) return null;
-//   const records = await BlockTime.find({});
-//   // console.log('records=============', records)
-//   // console.log('drawLabel=============', drawLabel)
-//   // console.log('loggedInUserType=============', loggedInUserType)
-//   // Normalize incoming label to improve matching (e.g., "LSK 3 PM" -> "LSK3")
-
-
-//   const originalLabel = drawLabel;
-//   const normalizedLabel = normalizeDrawLabelLimit(drawLabel);
-
-//   let record = await BlockTime.findOne({ drawLabel: originalLabel, type: loggedInUserType });
-//   // let record2 = await BlockTime.find({});
-//   // console.log('record2=============', record2);
-//   // console.log('record=============', normalizedLabel)
-
-//   if (!record) {
-//     // Try normalized (space/AM/PM removed, uppercased)
-//     record = await BlockTime.findOne({ drawLabel: normalizedLabel, type: loggedInUserType });
-//   }
-
-//   if (!record) {
-//     // Fallback to case-insensitive exact match on normalized form
-//     const escaped = normalizedLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-//     record = await BlockTime.findOne({ drawLabel: { $regex: `^${escaped}$`, $options: 'i' }, type: loggedInUserType });
-//   }
-
-//   if (!record) return null;
-//   // console.log('record=============', record)
-//   return {
-//     blockTime: record.blockTime,
-//     unblockTime: record.unblockTime
-//   };
-// }
-function mapUserTypeToBlockType(userType) {
-  if (!userType) return null;
-
-  const map = {
-    AGENT: "sub",
-    SUB: "sub",
-    ADMIN: "admin",
-    MASTER: "master"
-  };
-
-  return map[userType.toUpperCase()] || null;
-}
-
-// 🔹 Then use it here
 async function getBlockTimeF(drawLabel, loggedInUserType) {
   if (!drawLabel || !loggedInUserType) return null;
+  const records = await BlockTime.find({});
+  // console.log('records=============', records)
+  // console.log('drawLabel=============', drawLabel)
+  // console.log('loggedInUserType=============', loggedInUserType)
+  // Normalize incoming label to improve matching (e.g., "LSK 3 PM" -> "LSK3")
 
-  const normalizedInput = normalizeDrawLabelLimit(drawLabel);
-  const blockType = mapUserTypeToBlockType(loggedInUserType);
 
-  if (!blockType) return null;
+  const originalLabel = drawLabel;
+  const normalizedLabel = normalizeDrawLabelLimit(drawLabel);
 
-  const records = await BlockTime.find({ type: blockType });
+  let record = await BlockTime.findOne({ drawLabel: originalLabel, type: loggedInUserType });
+  // let record2 = await BlockTime.find({});
+  // console.log('record2=============', record2);
+  // console.log('record=============', normalizedLabel)
 
-  for (const record of records) {
-    if (normalizeDrawLabelLimit(record.drawLabel) === normalizedInput) {
-      return {
-        blockTime: record.blockTime,
-        unblockTime: record.unblockTime
-      };
-    }
+  if (!record) {
+    // Try normalized (space/AM/PM removed, uppercased)
+    record = await BlockTime.findOne({ drawLabel: normalizedLabel, type: loggedInUserType });
   }
 
-  return null;
-}
+  if (!record) {
+    // Fallback to case-insensitive exact match on normalized form
+    const escaped = normalizedLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    record = await BlockTime.findOne({ drawLabel: { $regex: `^${escaped}$`, $options: 'i' }, type: loggedInUserType });
+  }
 
+  if (!record) return null;
+  // console.log('record=============', record)
+  return {
+    blockTime: record.blockTime,
+    unblockTime: record.unblockTime
+  };
+}
 const getTicketLimits = async () => {
   try {
     const latest = await TicketLimit.findOne().sort({ _id: -1 }); // latest record
@@ -3294,7 +3189,6 @@ const saveValidEntries = async (req, res) => {
 
       // 1️⃣2️⃣ Clear local entries cache to ensure reports show fresh data
       entriesCache.clear();
-      reportCache.clear();
     } catch (summaryErr) {
       console.error("❌ Error updating SalesReportSummary:", summaryErr);
     }
@@ -5511,88 +5405,6 @@ async function updateAutomaticSummary(username, dateStr, timeLabel, timeCode, ne
   }
 }
 
-/**
- * Update SalesReportSummary incrementally for edits/deletes
- */
-async function updateSummaryDelta(username, dateStr, timeLabel, scheme, countDelta, amountDelta) {
-  try {
-    const normUsername = normalizeName(username);
-    const allUsers = await MainUser.find().select("username _id createdBy");
-
-    const userMap = {};
-    allUsers.forEach(u => {
-      userMap[normalizeName(u.username)] = u._id;
-    });
-
-    const drawKey = (timeLabel || "").trim().toUpperCase();
-    const drawLabel = summaryLabelMap[drawKey] || drawKey;
-
-    // Build hierarchy path
-    const path = [];
-    let currentName = normUsername;
-    const visited = new Set();
-    while (currentName && !visited.has(currentName)) {
-      visited.add(currentName);
-      path.push(currentName);
-      const user = allUsers.find(u => normalizeName(u.username) === currentName);
-      currentName = normalizeName(user?.createdBy);
-    }
-
-    // Update each level in the hierarchy
-    for (const currentUser of path) {
-      const isSeller = currentUser === normUsername;
-      const userId = userMap[currentUser];
-      if (!userId) continue;
-
-      const summary = await SalesReportSummary.findOneAndUpdate(
-        { createdBy: currentUser, date: dateStr, drawTime: drawLabel },
-        {
-          $setOnInsert: { userId, schemes: [{ rows: [] }] },
-          $inc: {
-            totalCount: countDelta,
-            totalAmount: amountDelta,
-            [isSeller ? "selfCount" : "childCount"]: countDelta,
-            [isSeller ? "selfAmount" : "childAmount"]: amountDelta
-          }
-        },
-        { upsert: true, new: true }
-      );
-
-      // Update the specific scheme row
-      const existingRows = summary.schemes?.[0]?.rows || [];
-      const rowIndex = existingRows.findIndex(r => r.scheme === scheme);
-
-      if (rowIndex !== -1) {
-        await SalesReportSummary.updateOne(
-          { _id: summary._id, "schemes.0.rows.scheme": scheme },
-          {
-            $inc: {
-              "schemes.0.rows.$.count": countDelta,
-              "schemes.0.rows.$.amount": amountDelta
-            }
-          }
-        );
-      } else if (countDelta !== 0 || amountDelta !== 0) {
-        // If row doesn't exist and we are adding (not just subtracting to 0)
-        await SalesReportSummary.updateOne(
-          { _id: summary._id },
-          {
-            $push: {
-              "schemes.0.rows": {
-                scheme: scheme,
-                count: countDelta,
-                amount: amountDelta
-              }
-            }
-          }
-        );
-      }
-    }
-  } catch (err) {
-    console.error("❌ updateSummaryDelta error:", err);
-  }
-}
-
 const createSalesReportSummary = async (req, res) => {
   try {
     const { userId, createdBy, date, drawTime, schemes } = req.body;
@@ -5677,80 +5489,6 @@ const getSalesReportSummary = async (req, res) => {
   }
 };
 
-const updateSalesReportSummary = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { schemeId, rowId, count, userType } = req.body;
-
-    const newCount = Number(count);
-    if (!Number.isFinite(newCount) || newCount < 0) {
-      return res.status(400).json({ message: "Invalid count" });
-    }
-
-    /* 1️⃣ FIND SUMMARY */
-    const summary = await SalesReportSummary.findById(id);
-    if (!summary) {
-      return res.status(404).json({ message: "Sales report summary not found" });
-    }
-
-    /* 2️⃣ BLOCK TIME CHECK (same as before) */
-    const blockTimeData = await getBlockTimeF(summary.drawTime, userType);
-    if (!blockTimeData?.blockTime) {
-      return res.status(400).json({ message: "Block time not found" });
-    }
-
-    const [bh, bm] = blockTimeData.blockTime.split(":").map(Number);
-    const d = new Date(summary.date);
-    const blockTime = new Date(d.getFullYear(), d.getMonth(), d.getDate(), bh, bm);
-
-    if (new Date() >= blockTime) {
-      return res.status(400).json({
-        message: "Cannot update count, entry time is blocked for this draw"
-      });
-    }
-
-    /* 3️⃣ FIND ROW + CALCULATE DIFF (KEY PART 🔥) */
-    let oldCount = null;
-
-    for (const scheme of summary.schemes) {
-      if (scheme._id.toString() === schemeId) {
-        for (const row of scheme.rows) {
-          if (row._id.toString() === rowId) {
-            oldCount = Number(row.count) || 0;
-            row.count = newCount; // set new value
-            break;
-          }
-        }
-      }
-    }
-
-    if (oldCount === null) {
-      return res.status(404).json({ message: "Row not found" });
-    }
-
-    /* 4️⃣ DIFFERENCE LOGIC (EXACT updateEntries behavior) */
-    const diff = newCount - oldCount;
-
-    summary.totalCount = (Number(summary.totalCount) || 0) + diff;
-
-    /* 5️⃣ SAVE */
-    await summary.save();
-
-    res.status(200).json({
-      message: "Sales report summary updated using updateEntries logic",
-      diff,
-      oldCount,
-      newCount,
-      totalCount: summary.totalCount
-    });
-
-  } catch (err) {
-    console.error("❌ UPDATE SALES REPORT SUMMARY ERROR:", err);
-    res.status(500).json({ message: "Server error updating sales report summary" });
-  }
-};
-
-
 
 
 
@@ -5821,6 +5559,5 @@ module.exports = {
   deleteUserAmount,
   createSalesReportSummary,
   getSalesReportSummary,
-  updateSalesReportSummary,
   syncSummaries
 };

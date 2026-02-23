@@ -5,8 +5,25 @@ dotenv.config();
 const connectDB = require('./database/model/ConnectToDb');
 const Controller = require('./controller/Controller');
 
+const MainUser = require('./model/MainUser');
+const Entry = require('./model/Entry');
+const RateMaster = require('./model/RateMaster');
+
+
 const app = express();
 connectDB();
+
+async function ensureIndexes() {
+  try {
+    await Entry.syncIndexes();
+    await MainUser.syncIndexes();
+    await RateMaster.syncIndexes();
+    console.log("✅ MongoDB indexes ensured");
+  } catch (err) {
+    console.error("❌ Index creation failed:", err);
+  }
+}
+
 app.use(express.json());
 
 
@@ -35,7 +52,9 @@ app.delete('/deleteEntryById/:id/:userType', Controller.deleteEntryById);
 app.delete('/deleteEntriesByBillNo/:billNo', Controller.deleteEntriesByBillNo);
 app.put('/updateEntryCount/:id', Controller.updateEntryCount);
 app.get('/report/count', Controller.getCountReport);
+app.get('/ratemaster', Controller.getRateMaster);
 app.get('/rateMaster', Controller.getRateMaster);
+
 app.post('/setBlockTime', Controller.setBlockTime);
 app.get('/getBlockTime/:drawLabel', Controller.getBlockTime);
 app.get('/blockTime/:drawLabel/:type', Controller.getBlockTimeByType);
@@ -59,6 +78,36 @@ app.put('/block-numbers/:id', Controller.updateBlockedNumber);
 app.delete('/block-numbers/:id', Controller.deleteBlockedNumber);
 app.get('/block-numbers/:createdBy/:drawTime', Controller.getBlockedNumbersByUser);
 app.delete('/block-numbers/bulk', Controller.bulkDeleteBlockedNumbers);
+
+app.get('/overflow-limit', Controller.getOverflowLimit);
+app.post('/overflow-limit', Controller.saveOverflowLimit);
+app.get('/overflow-limit/by-drawtime', Controller.getOverflowLimitByDrawTime);
+// ADD new draw scheme (admin)
+app.post("/draw-scheme", Controller.addDrawToTab);
+// GET draw scheme by time
+app.get('/draw-scheme', Controller.getDrawByTabAndName);
+// UPDATE super value only
+app.put("/draw-scheme/super", Controller.updateSuperForDraw);
+app.post('/add-amount', Controller.addUserAmount);
+app.get('/get-amount', Controller.getUserAmounts);
+app.patch('/user-amount/:id/amount', Controller.updateAmountOnly);
+app.delete('/user-amount/:id', Controller.deleteUserAmount);
+
+app.post('/sales-report-summary', Controller.createSalesReportSummary);
+app.get('/sales-report-summary', Controller.getSalesReportSummary);
+app.put('/sales-report-summary/:id', Controller.updateSalesReportSummary);
+// app.delete('/sales-report-summary/:id', Controller.deleteSalesReportSummary);
+
+app.post('/report/sync-summaries', Controller.syncSummaries);
+
+app.get("/debug/rateMasters", async (req, res) => {
+  const rates = await RateMaster.find({});
+  res.json(rates);
+});
+
+
+
+
 
 const port = process.env.PORT || 5000;
 app.listen(port, () => {

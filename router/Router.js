@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { createUser,addEntries,getAllUsers,deleteUser,saveTicketLimit,saveRateMaster,saveResult,getEntries,getNextBillNumber,  loginUser, invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster,getBlockTime,setBlockTime,countByNumber, getLatestTicketLimit ,toggleLoginBlock,toggleSalesBlock,updatePasswordController, getResult
+const { createUser,addEntries,getAllUsers,deleteUser,saveTicketLimit,saveRateMaster,saveResult,getEntries,getNextBillNumber,  loginUser, invalidateEntry,deleteEntryById,deleteEntriesByBillNo,updateEntryCount,  getCountReport,getRateMaster,getBlockTime,setBlockTime,countByNumber, getLatestTicketLimit ,toggleLoginBlock,toggleSalesBlock,updatePasswordController, getResult,
 // ✅ Add this
 
  } = require('../controller/Controller');
