@@ -91,6 +91,93 @@ const extractBaseType = (type) => {
   return parts[parts.length - 1] || "SUPER";
 };
 
+/**
+ * Refund or adjust limits in DailyLimitUsage and DailyUserLimit
+ */
+const adjustEntryLimits = async (entry, countDelta) => {
+  try {
+    const rawType = extractBaseType(entry.type);
+    const dateStr = formatDateIST(new Date(entry.date));
+    const number = entry.number;
+    const user = entry.createdBy;
+
+    // Update DailyLimitUsage
+    await DailyLimitUsage.updateOne(
+      { date: dateStr, type: rawType, number: number },
+      { $inc: { remaining: -countDelta } }
+    );
+
+    // Update DailyUserLimit
+    await DailyUserLimit.updateOne(
+      { date: dateStr, user: user, type: rawType, number: number },
+      { $inc: { remaining: -countDelta } }
+    );
+  } catch (err) {
+    console.error('❌ [adjustEntryLimits] Error:', err);
+  }
+};
+
+/**
+ * Bulk fetch actual usage for a user and date for specific keys (TYPE-NUMBER)
+ */
+const getActualUsageMap = async (dateStr, user, keys) => {
+  try {
+    const start = parseDateISTStart(dateStr);
+    const end = parseDateISTEnd(dateStr);
+
+    const entries = await Entry.find({
+      createdBy: user,
+      date: { $gte: start, $lte: end },
+      isValid: true
+    }).lean();
+
+    const map = {};
+    keys.forEach(k => map[k] = 0);
+
+    entries.forEach(e => {
+      const type = extractBaseType(e.type);
+      const key = `${type}-${e.number}`;
+      if (map[key] !== undefined) {
+        map[key] += (Number(e.count) || 0);
+      }
+    });
+    return map;
+  } catch (err) {
+    console.error('❌ [getActualUsageMap] Error:', err);
+    return {};
+  }
+};
+
+/**
+ * Bulk fetch actual usage for all users for specific keys (TYPE-NUMBER)
+ */
+const getGeneralActualUsageMap = async (dateStr, keys) => {
+  try {
+    const start = parseDateISTStart(dateStr);
+    const end = parseDateISTEnd(dateStr);
+
+    const entries = await Entry.find({
+      date: { $gte: start, $lte: end },
+      isValid: true
+    }).lean();
+
+    const map = {};
+    keys.forEach(k => map[k] = 0);
+
+    entries.forEach(e => {
+      const type = extractBaseType(e.type);
+      const key = `${type}-${e.number}`;
+      if (map[key] !== undefined) {
+        map[key] += (Number(e.count) || 0);
+      }
+    });
+    return map;
+  } catch (err) {
+    console.error('❌ [getGeneralActualUsageMap] Error:', err);
+    return {};
+  }
+};
+
 
 
 
@@ -1135,6 +1222,9 @@ const deleteEntryById = async (req, res) => {
 
     await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
 
+    // 🟢 Refund limits
+    await adjustEntryLimits(obj, -oldCount);
+
     const deletedEntry = await Entry.findByIdAndDelete(id);
 
     // 🟢 Clear caches to ensure immediate update in reports
@@ -1170,6 +1260,9 @@ const deleteEntriesByBillNo = async (req, res) => {
       const dateStr = formatDateIST(new Date(obj.createdAt)); // 🔑 Use createdAt (transaction date)
 
       await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
+
+      // 🟢 Refund limits
+      await adjustEntryLimits(obj, -oldCount);
     }
 
     await Entry.deleteMany({ billNo });
@@ -1578,6 +1671,9 @@ const updateEntryCount = async (req, res) => {
 
     await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
 
+    // 🟢 Adjust limits
+    await adjustEntryLimits(obj, countDelta);
+
     // 🟢 Clear caches to ensure immediate update in reports
     entriesCache.clear();
     reportCache.clear();
@@ -1654,10 +1750,32 @@ const getAllUsers = async (req, res) => {
     const { createdBy } = req.query;
     const query = createdBy ? { createdBy } : {};
 
-    const users = await MainUser.find(query).select('-password -nonHashedPassword');
+    // Use .lean() for better performance when we need to modify the objects
+    const users = await MainUser.find(query).select('-password -nonHashedPassword').lean();
 
-    // const userss = await MainUser.find(query);
-    res.status(200).json(users);
+    // Fetch all users to build the parent map for hierarchy calculation
+    const allUsers = await MainUser.find().select('username createdBy').lean();
+    const parentMap = {};
+    allUsers.forEach(u => {
+      if (u.username) {
+        parentMap[u.username.toLowerCase()] = u.createdBy;
+      }
+    });
+
+    const usersWithHierarchy = users.map(user => {
+      const partner = user.createdBy || '-';
+      const stockist = (partner !== '-' && parentMap[partner.toLowerCase()]) || '-';
+      const subStockist = (stockist !== '-' && parentMap[stockist.toLowerCase()]) || '-';
+
+      return {
+        ...user,
+        partner,
+        stockist,
+        subStockist,
+      };
+    });
+
+    res.status(200).json(usersWithHierarchy);
   } catch (error) {
     console.error('[GET USERS ERROR]', error);
     res.status(500).json({ message: 'Failed to fetch users' });
@@ -1670,12 +1788,32 @@ const getusersByid = async (req, res) => {
       return res.status(400).json({ message: 'User _id is required' });
     }
 
-    const user = await MainUser.findById(id).select('');
+    const user = await MainUser.findById(id).select('-password -nonHashedPassword').lean();
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    res.status(200).json(user);
+    // Fetch all users to build the parent map for hierarchy calculation
+    const allUsers = await MainUser.find().select('username createdBy').lean();
+    const parentMap = {};
+    allUsers.forEach(u => {
+      if (u.username) {
+        parentMap[u.username.toLowerCase()] = u.createdBy;
+      }
+    });
+
+    const partner = user.createdBy || '-';
+    const stockist = (partner !== '-' && parentMap[partner.toLowerCase()]) || '-';
+    const subStockist = (stockist !== '-' && parentMap[stockist.toLowerCase()]) || '-';
+
+    const userWithHierarchy = {
+      ...user,
+      partner,
+      stockist,
+      subStockist,
+    };
+
+    res.status(200).json(userWithHierarchy);
   } catch (error) {
     console.error('[GET USER BY ID ERROR]', error);
     res.status(500).json({ message: 'Failed to fetch user' });
@@ -1720,11 +1858,13 @@ const calculateWinAmount = (entry, results, schemeData) => {
   let row;
   if (baseType === "SUPER" || baseType === "BOX") {
     const match = winType.match(/(\d+)/); // Extracts 1, 2, 3...
-    const pos = match ? parseInt(match[1], 10) : 1;
+    const pos = match
+      ? parseInt(match[1], 10)
+      : (winType.toLowerCase().includes("other") || winType.toLowerCase().includes("permutation") ? 6 : 1);
     row = group.rows.find(r => r.pos === pos);
 
     // Box fallback for non-doubles if pos > 1
-    if (!row && baseType === "BOX") {
+    if (!row && baseType === "BOX" && pos <= 1) {
       row = group.rows[0]; // Default to first row
     }
   } else {
@@ -2159,12 +2299,29 @@ function computeWinType(entry, results) {
     return "";
   }
 
-  if (baseType === "BOX" && first) {
-    const isDouble = isDoubleNumber(first);
-    const isPerfect = num === first;
-    const isPerm = num.split("").sort().join("") === first.split("").sort().join("");
-    if (isPerfect) return isDouble ? "BOX double perfect" : "BOX perfect";
-    if (isPerm) return isDouble ? "BOX double permutation" : "BOX permutation";
+  if (baseType === "BOX") {
+    const sortStr = (s) => s.split("").sort().join("");
+    const numSorted = sortStr(num);
+
+    // 1. Check Prizes 1-5
+    for (let i = 1; i <= 5; i++) {
+      const prize = results[String(i)];
+      if (!prize) continue;
+
+      if (num === prize) {
+        return i === 1 ? "BOX perfect" : `BOX ${i} perfect`;
+      }
+      if (numSorted === sortStr(prize)) {
+        return "BOX permutation"; // Any permutation goes to Pos 6
+      }
+    }
+
+    // 2. Check Others
+    for (const other of others) {
+      if (num === other || numSorted === sortStr(other)) {
+        return "BOX other"; // Any "other" match goes to Pos 6
+      }
+    }
     return "";
   }
 
@@ -2995,128 +3152,142 @@ const saveValidEntries = async (req, res) => {
     // 5️⃣ Fetch remaining from DailyLimitUsage
     const keys = Object.keys(newTotalByNumberType);
     const remainingMap = await countByUsageF(targetDateStr, keys);
+    const generalActualUsageMap = await getGeneralActualUsageMap(targetDateStr, keys);
 
     // 6️⃣ Validate entries
-    const validEntries = [];
-    const exceededEntries = [];
+    let validEntries = [];
+    const exceededMap = {}; // key -> { key, attempted, exceeded, added, reason }
+    const usedInGeneralBatchByNumber = {};
 
+    // PASS 1: General Daily Limits
     for (const entry of expandedEntries) {
       const count = entry.count || 1;
       const rawType = entry.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
       const number = entry.number;
       const key = `${rawType}-${number}`;
 
-      const maxLimit = parseInt(allLimits[rawType] || '9999', 10);
-      const remainingFromDb = remainingMap[key]?.remaining;
-      const allowedCount = typeof remainingFromDb === 'number'
-        ? remainingFromDb
-        : maxLimit;
+      if (!exceededMap[key]) {
+        exceededMap[key] = { key, attempted: 0, exceeded: 0, added: 0, reason: '', limit: 0 };
+      }
+      exceededMap[key].attempted += count;
 
-      if (allowedCount <= 0) {
-        exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: maxLimit - allowedCount, added: 0 });
+      const maxLimit = parseInt(allLimits[rawType] || '9999', 10);
+      exceededMap[key].limit = maxLimit;
+      const remainingFromDb = remainingMap[key]?.remaining;
+
+      // 🛡️ EFFECTIVE REMAINING (GENERAL)
+      const usedToday = generalActualUsageMap[key] || 0;
+      const effectiveRemaining = Math.max(typeof remainingFromDb === 'number' ? remainingFromDb : 0, maxLimit - usedToday);
+      const remainingForBatch = Math.max(0, effectiveRemaining - (usedInGeneralBatchByNumber[key] || 0));
+
+      if (remainingForBatch <= 0) {
+        exceededMap[key].exceeded += count;
+        exceededMap[key].reason = 'Daily limit reached';
         continue;
       }
 
-      if (count <= allowedCount) {
-        validEntries.push(entry);
+      const willAdd = Math.min(count, remainingForBatch);
+      if (willAdd < count) {
+        exceededMap[key].exceeded += (count - willAdd);
+        exceededMap[key].added += willAdd;
+        exceededMap[key].reason = 'Daily limit partial';
+        validEntries.push({ ...entry, count: willAdd });
+        usedInGeneralBatchByNumber[key] = (usedInGeneralBatchByNumber[key] || 0) + willAdd;
       } else {
-        validEntries.push({ ...entry, count: allowedCount });
-        exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: maxLimit - allowedCount, added: allowedCount });
+        exceededMap[key].added += count;
+        validEntries.push(entry);
+        usedInGeneralBatchByNumber[key] = (usedInGeneralBatchByNumber[key] || 0) + count;
       }
     }
-    // console.log('exceededEntries=============', exceededEntries)
 
-    if (validEntries.length === 0) {
-      // return res.status(400).json({ message: 'All entries exceed allowed limits', exceeded: exceededEntries });
-      const humanLines = exceededEntries.map(e => `${e.key} → attempted ${e.attempted}, remaining 0`);
-      const humanMessage = ['Daily limit reached for:', ...humanLines, '', 'Nothing was saved. Reduce the count and try again.'].join('\n');
-      return res.status(400).json({ message: humanMessage });
-    }
-
-    if (exceededEntries.length > 0) {
-      const humanLines = exceededEntries.map(e => `${e.key} → attempted ${e.attempted}, remaining ${Math.max(0, (e.limit || 0) - (e.existing || 0))}`);
-      const humanMessage = ['Daily limit reached for:', ...humanLines, '', 'Nothing was saved. Reduce the count and try again.'].join('\n');
-      return res.status(400).json({ message: humanMessage });
-    }
-
-
-    const blockedNumbersExceeded = [];
 
     // 7️⃣ Enforce strict per-user BlockNumber limit
+    // PASS 2: Strict User Blocked Numbers
+    let nextValidEntries = [];
     for (const entry of validEntries) {
-      const rawTypes = await extractBaseType(entry.type)
-      const rawTime = await extractBetTypeTime(entry.type)
+      const rawTypes = await extractBaseType(entry.type);
+      const rawTime = await extractBetTypeTime(entry.type);
       const number = entry.number;
-      // const block = await BlockNumber.find({createdBy:'4',field:rawTypes});
-      // console.log('block=============', block);
-      // console.log('block=============', entry)
-      // console.log('block=============', rawTypes);
-      // console.log('block=============', rawTime)
-
+      const key = `${rawTypes}-${number}`;
 
       const blocked = await BlockNumber.findOne({
         field: rawTypes,
         number,
         drawTime: rawTime,
-        createdBy: loggedInUser, // the agent/user whose limit we check
-        isActive: true,
+        createdBy: loggedInUser,
+        isActive: true, // Only fetch ACTIVE blocks
       });
-      // console.log('block=============', blocked)
-      if (blocked && blocked.count < entry.count) {
-        blockedNumbersExceeded.push({
-          key: `${rawTypes}-${number}`,
-          attempted: entry.count,
-          remaining: blocked.count
-        });
+
+      if (blocked && blocked.isActive && blocked.count < entry.count) {
+        const allowed = Math.max(0, blocked.count);
+        const removed = entry.count - allowed;
+
+        exceededMap[key].exceeded += removed;
+        exceededMap[key].added -= removed;
+        exceededMap[key].reason = 'User blocked number';
+        exceededMap[key].limit = blocked.count;
+
+        if (allowed > 0) {
+          nextValidEntries.push({ ...entry, count: allowed });
+        }
+      } else {
+        nextValidEntries.push(entry);
       }
     }
+    validEntries = nextValidEntries;
 
-    if (blockedNumbersExceeded.length > 0) {
-      // console.log('blockedNumbersExceeded', blockedNumbersExceeded)
-      const message = blockedNumbersExceeded.map(e => `${e.key} → attempted ${e.attempted}, allowed ${e.remaining}`).join('\n');
-      return res.status(400).json({ message: 'User limit exceeded:\n' + message });
-    }
+    // PASS 3: User Daily Usage Limits
+    const keysForUserUsage = [...new Set(validEntries.map(e => `${extractBaseType(e.type)}-${e.number}`))];
+    const userRemainingMap = await countByUserUsageF(targetDateStr, loggedInUser, keysForUserUsage);
 
-    // Fetch per-user remaining
-    const userRemainingMap = await countByUserUsageF(targetDateStr, loggedInUser, keys);
-    // console.log('userRemainingMap====', userRemainingMap)
+    // 🔥 SELF-HEALING: Fetch actual usage to ensure we never have stale "remaining" values
+    const actualUsageMap = await getActualUsageMap(targetDateStr, loggedInUser, keysForUserUsage);
 
-    // Check per-user daily limit
-    // Check per-user daily limit based on BlockNumber
-    const userExceededEntries = [];
+    nextValidEntries = [];
+    const usedInBatchByNumber = {}; // track use within this batch to subtract correctly
 
     for (const entry of validEntries) {
-      const rawTypes = await extractBaseType(entry.type);
-      const rawTime = await extractBetTypeTime(entry.type);
+      const rawTypes = extractBaseType(entry.type);
       const number = entry.number;
+      const key = `${rawTypes}-${number}`;
 
-      // Fetch the per-user block number limit
-      const block = await BlockNumber.findOne({
-        field: rawTypes,
-        number,
-        drawTime: rawTime,
-        createdBy: loggedInUser,
-        isActive: true,
-      });
+      const block = await BlockNumber.findOne({ field: rawTypes, number, drawTime: extractBetTypeTime(entry.type), createdBy: loggedInUser, isActive: true });
+      const maxLimit = (block && block.isActive) ? block.count : parseInt(allLimits[rawTypes] || '9999', 10);
 
-      const maxLimit = block?.count ?? parseInt(allLimits[rawTypes] || '9999', 10); // fallback to general limit
-      const remainingFromDb = typeof userRemainingMap[`${rawTypes}-${number}`]?.remaining === 'number'
-        ? userRemainingMap[`${rawTypes}-${number}`].remaining
+      const remainingFromDb = typeof userRemainingMap[key]?.remaining === 'number'
+        ? userRemainingMap[key].remaining
         : maxLimit;
 
-      // console.log('userRemainingMap====', remainingFromDb)
-      if (entry.count > remainingFromDb) {
-        userExceededEntries.push({
-          key: `${rawTypes}-${number}`,
-          attempted: entry.count,
-          remaining: remainingFromDb
-        });
+      // 🛡️ EFFECTIVE REMAINING: Sync with actual database state
+      const usedToday = actualUsageMap[key] || 0;
+      const effectiveRemaining = Math.max(remainingFromDb, maxLimit - usedToday);
+      const remainingForBatch = Math.max(0, effectiveRemaining - (usedInBatchByNumber[key] || 0));
+
+      if (entry.count > remainingForBatch) {
+        const allowed = Math.max(0, remainingForBatch);
+        const removed = entry.count - allowed;
+
+        exceededMap[key].exceeded += removed;
+        exceededMap[key].added -= removed;
+        exceededMap[key].reason = 'User daily limit';
+        exceededMap[key].limit = maxLimit;
+
+        if (allowed > 0) {
+          nextValidEntries.push({ ...entry, count: allowed });
+          usedInBatchByNumber[key] = (usedInBatchByNumber[key] || 0) + allowed;
+        }
+      } else {
+        nextValidEntries.push(entry);
+        usedInBatchByNumber[key] = (usedInBatchByNumber[key] || 0) + entry.count;
       }
     }
-    if (userExceededEntries.length > 0) {
-      const humanLines = userExceededEntries.map(e => `${e.key} → attempted ${e.attempted}, remaining ${e.remaining}`);
-      const humanMessage = ['User daily limit reached for:', ...humanLines, '', 'Nothing was saved. Reduce the count and try again.'].join('\n');
-      return res.status(400).json({ message: humanMessage });
+    validEntries = nextValidEntries;
+
+    const allExceeded = Object.values(exceededMap).filter(e => e.exceeded > 0);
+
+    if (validEntries.length === 0) {
+      const message = allExceeded.map(e => `${e.key}: Blocked ${e.exceeded} (${e.reason})`).join('\n');
+      return res.status(400).json({ message: 'All entries failed validation:\n' + message, exceeded: allExceeded });
     }
 
 
@@ -3220,21 +3391,13 @@ const saveValidEntries = async (req, res) => {
     const ops = Object.entries(usageByTypeNumber).map(([key, used]) => {
       const [rawType, number] = key.split('-');
       const max = parseInt(allLimits[rawType] || '9999', 10);
+      const usedToday = generalActualUsageMap[key] || 0;
+      const newRemaining = Math.max(0, max - (usedToday + used));
+
       return {
         updateOne: {
           filter: { date: targetDateStr, type: rawType, number },
-          update: [
-            {
-              $set: {
-                remaining: {
-                  $let: {
-                    vars: { curr: "$remaining" },
-                    in: { $max: [0, { $subtract: [{ $ifNull: ["$$curr", max] }, used] }] }
-                  }
-                }
-              }
-            }
-          ],
+          update: { $set: { remaining: newRemaining } },
           upsert: true
         }
       };
@@ -3245,40 +3408,32 @@ const saveValidEntries = async (req, res) => {
     }
 
     // Per-user daily limit update
-    // Build per-user usage operations strictly using BlockNumber limits
-    const userOps = await Promise.all(
-      validEntries.map(async (entry) => {
-        const rawType = await extractBaseType(entry.type);
-        const rawTime = await extractBetTypeTime(entry.type);
-        const number = entry.number;
-        const count = entry.count || 1;
+    // Update DailyUserLimit by setting the NEW remaining value after this save
+    const userSummaryMap = {}; // number-type -> totalCountInBatch
+    validEntries.forEach((e) => {
+      const key = `${extractBaseType(e.type)}-${e.number}`;
+      userSummaryMap[key] = (userSummaryMap[key] || 0) + (e.count || 1);
+    });
 
-        // Get the strict per-user BlockNumber limit
+    const userOps = await Promise.all(
+      Object.entries(userSummaryMap).map(async ([key, count]) => {
+        const [rawType, number] = key.split('-');
         const block = await BlockNumber.findOne({
           field: rawType,
           number,
-          drawTime: rawTime,
+          drawTime: extractBetTypeTime(validEntries.find(ev => extractBaseType(ev.type) === rawType && ev.number === number)?.type || ""),
           createdBy: loggedInUser,
           isActive: true
         });
 
-        const max = block?.count ?? parseInt(allLimits[rawType] || '9999', 10);
+        const max = (block && block.isActive) ? block.count : parseInt(allLimits[rawType] || '9999', 10);
+        const usedToday = actualUsageMap[key] || 0;
+        const newRemaining = Math.max(0, max - (usedToday + count));
 
         return {
           updateOne: {
             filter: { date: targetDateStr, user: loggedInUser, type: rawType, number },
-            update: [
-              {
-                $set: {
-                  remaining: {
-                    $let: {
-                      vars: { curr: '$remaining' },
-                      in: { $max: [0, { $subtract: [{ $ifNull: ['$$curr', max] }, count] }] },
-                    },
-                  },
-                },
-              },
-            ],
+            update: { $set: { remaining: newRemaining } },
             upsert: true,
           },
         };
@@ -3300,7 +3455,7 @@ const saveValidEntries = async (req, res) => {
     }
 
 
-    return res.json({ billNo: savedBill.billNo, exceeded: [] });
+    return res.json({ billNo: savedBill.billNo, exceeded: allExceeded });
 
   } catch (err) {
     console.error('Error saving entries:', err);
@@ -4931,8 +5086,9 @@ const updateSuperForDraw = async (req, res) => {
             (r.scheme === u.scheme && r.pos === Number(u.pos))
           );
           if (row) {
-            row.super = Number(u.super);
-            console.log(`Updated Row [${row.scheme} ${row.pos}] to ${u.super}`);
+            const superValue = Number(u.super);
+            row.super = isNaN(superValue) ? 0 : superValue;
+            console.log(`Updated Row [${row.scheme} ${row.pos}] to ${row.super}`);
             break;
           }
         }
