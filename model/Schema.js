@@ -24,7 +24,7 @@ const drawSchema = new mongoose.Schema({
 // Active tab containing multiple draws
 const drawSchemeSchema = new mongoose.Schema(
   {
-    activeTab: { type: Number, required: true }, // 1, 2, 3...
+    activeTab: { type: Number, required: true, unique: true }, // 1, 2, 3...
     draws: [drawSchema] // multiple draws per tab
   },
   { timestamps: true }

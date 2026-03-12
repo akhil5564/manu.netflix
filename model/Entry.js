@@ -31,6 +31,7 @@ const EntrySchema = new mongoose.Schema({
   billNo: String,
   date: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now },
+  
 });
 
 /* 🔥 PERFORMANCE INDEX */

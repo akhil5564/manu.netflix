@@ -18,6 +18,14 @@ const Schema = require('../model/Schema')
 const UserAmount = require('../model/FixAmount')
 const { getCache, setCache } = require("../utils/cache");
 const SalesReportSummary = require("../model/Summary");
+const WinningSummary = require("../model/winningsummmary");
+const { saveWinningSummaryInternal } = require("../sevices/winningSummary.service");
+const {
+  extractBaseType,
+  computeWinType,
+  calculateWinAmount,
+  calculateWinAmountFull
+} = require("../utils/winningUtils");
 
 
 
@@ -70,26 +78,41 @@ const getRateForType = (type) => {
 // Global standardization map for Draw Labels
 const summaryLabelMap = {
   "DEAR 1 PM": "DEAR 1 PM",
+  "DEAR 1PM": "DEAR 1 PM",
   "KERALA 3 PM": "KERALA 3 PM",
+  "KERALA 3PM": "KERALA 3 PM",
   "LSK 3 PM": "KERALA 3 PM",
+  "LSK 3PM": "KERALA 3 PM",
   "DEAR 6 PM": "DEAR 6 PM",
-  "DEAR 8 PM": "DEAR 8 PM"
+  "DEAR 6PM": "DEAR 6 PM",
+  "DEAR 8 PM": "DEAR 8 PM",
+  "DEAR 8PM": "DEAR 8 PM"
 };
 
-const extractBaseType = (type) => {
-  if (!type) return "SUPER";
-  const upper = type.toString().toUpperCase();
-  if (upper.includes("SUPER")) return "SUPER";
-  if (upper.includes("BOX")) return "BOX";
-  if (upper.includes("AB")) return "AB";
-  if (upper.includes("BC")) return "BC";
-  if (upper.includes("AC")) return "AC";
-  if (upper.endsWith("A") || upper.includes("-A")) return "A";
-  if (upper.endsWith("B") || upper.includes("-B")) return "B";
-  if (upper.endsWith("C") || upper.includes("-C")) return "C";
-  const parts = type.toString().split("-");
-  return parts[parts.length - 1] || "SUPER";
+const LABEL_GROUPS = [
+  ["DEAR 1 PM", "DEAR 1PM", "D-1", "D-1-", "DEAR1"],
+  ["KERALA 3 PM", "KERALA 3PM", "LSK 3 PM", "LSK 3PM", "LSK", "LSK3"],
+  ["DEAR 6 PM", "DEAR 6PM", "D-6", "D-6-", "DEAR6"],
+  ["DEAR 8 PM", "DEAR 8PM", "D-8", "D-8-", "DEAR8"]
+];
+
+const getSearchLabels = (label) => {
+  if (!label) return [];
+  const normalized = label.toString().toUpperCase().trim();
+  const normalizedNoSpace = normalized.replace(/\s+/g, "");
+
+  const group = LABEL_GROUPS.find(g =>
+    g.some(alias => {
+      const a = alias.toUpperCase();
+      return a === normalized || a.replace(/\s+/g, "") === normalizedNoSpace;
+    })
+  );
+
+  if (group) return group;
+  return [label];
 };
+
+// extractBaseType moved to winningUtils.js
 
 /**
  * Refund or adjust limits in DailyLimitUsage and DailyUserLimit
@@ -588,7 +611,7 @@ const updateUser = async (req, res) => {
     }
 
     // Return updated user (excluding sensitive data)
-    const { password: _, nonHashedPassword: __, ...userResponse } = updatedUser.toObject();
+    const { password: _, ...userResponse } = updatedUser.toObject();
 
     return res.status(200).json({
       success: true,
@@ -665,6 +688,82 @@ const getNextBillNumber = async () => {
   return result.counter.toString().padStart(5, '0'); // ➜ '00001', '00002', ...
 };
 
+/**
+ * Helper to get all ancestors of a user (including the user themselves).
+ * Returns an array of usernames.
+ */
+const getAncestors = async (username, visited = new Set()) => {
+  if (!username || visited.has(username.toLowerCase())) return [];
+  visited.add(username.toLowerCase());
+
+  // Case-insensitive user lookup
+  const user = await MainUser.findOne({
+    username: { $regex: new RegExp(`^${username}$`, 'i') }
+  });
+
+  if (!user) return [username];
+
+  let ancestors = [user.username];
+  if (user.createdBy && user.createdBy.toLowerCase() !== 'admin') {
+    // Recursively find parent with case-insensitive search
+    const parentAncestors = await getAncestors(user.createdBy, visited);
+    ancestors = ancestors.concat(parentAncestors);
+  }
+
+  return ancestors;
+};
+
+/**
+ * Helper to get all descendants of a user (usernames only).
+ */
+const getAllDescendantsFlat = async (username) => {
+  // Case-insensitive search for children createdBy this user
+  const users = await MainUser.find({
+    createdBy: { $regex: new RegExp(`^${username}$`, 'i') }
+  });
+
+  let descendants = users.map(u => u.username);
+
+  for (const child of users) {
+    const childDescendants = await getAllDescendantsFlat(child.username);
+    descendants = descendants.concat(childDescendants);
+  }
+
+  return descendants;
+};
+
+/**
+ * Helper to check if a user or any of their ancestors are blocked.
+ * Uses recursive createdBy traversal.
+ */
+const isUserOrAncestorBlocked = async (username) => {
+  const ancestors = await getAncestors(username);
+
+  for (const ancestorName of ancestors) {
+    const user = await MainUser.findOne({ username: ancestorName });
+    if (user && user.blocked) return true;
+  }
+
+  return false;
+};
+
+/**
+ * Helper to check if a user or any of their ancestors have sales blocked.
+ * Uses recursive createdBy traversal.
+ */
+const isUserOrAncestorSalesBlocked = async (username) => {
+  const ancestors = await getAncestors(username);
+
+  for (const ancestorName of ancestors) {
+    const user = await MainUser.findOne({
+      username: { $regex: new RegExp(`^${ancestorName}$`, 'i') }
+    });
+    if (user && user.salesBlocked) return true;
+  }
+
+  return false;
+};
+
 const loginUser = async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -681,9 +780,10 @@ const loginUser = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // ⛔ Check if the user is blocked
-    if (user.blocked) {
-      return res.status(403).json({ message: 'User is blocked. Contact admin.' });
+    // ⛔ Check if the user or any Master is blocked
+    const isBlocked = await isUserOrAncestorBlocked(user.username);
+    if (isBlocked) {
+      return res.status(403).json({ message: 'User or Master is blocked. Contact admin.' });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
@@ -691,7 +791,9 @@ const loginUser = async (req, res) => {
       return res.status(401).json({ message: 'Invalid password' });
     }
 
-    // ✅ Structured login response (include salesBlocked)
+    const isSalesBlocked = await isUserOrAncestorSalesBlocked(user.username);
+
+    // ✅ Structured login response (include hierarchical salesBlocked)
     return res.status(200).json({
       message: 'Login successful',
       user: {
@@ -699,7 +801,7 @@ const loginUser = async (req, res) => {
         username: user.username,
         userType: user.usertype,
         scheme: user.scheme || null,
-        salesBlocked: user.salesBlocked ?? false, // ✅ FIX
+        salesBlocked: isSalesBlocked,
         isLoginBlocked: user.blocked
       },
     });
@@ -966,40 +1068,33 @@ const getEntries = async (req, res) => {
 
     if (createdBy) query.createdBy = createdBy;
     if (timeCode) query.timeCode = timeCode;
-    if (timeLabel) query.timeLabel = timeLabel;
+    if (timeLabel && timeLabel.toLowerCase() !== "all") {
+      const normalized = summaryLabelMap[timeLabel.trim()] || timeLabel.trim().toUpperCase();
+      if (normalized === "KERALA 3 PM") {
+        query.timeLabel = { $in: ["KERALA 3 PM", "LSK 3 PM"] };
+      } else {
+        query.timeLabel = timeLabel;
+      }
+    }
     if (number) query.number = number;
     if (count) query.count = parseInt(count);
     if (billNo) query.billNo = billNo;
 
-    // ✅ FIX: combine date + after properly
+    // ✅ FIX: Separately handle designated draw date and pagination cursor
     const createdAtQuery = {};
-
     if (after) {
-      createdAtQuery.$gt = new Date(after);
+      createdAtQuery.$lt = new Date(after);
+      query.createdAt = createdAtQuery;
     }
 
     if (date) {
-      const start = new Date(date);
-      start.setHours(0, 0, 0, 0);
-
-      const end = new Date(date);
-      end.setHours(23, 59, 59, 999);
-
-      createdAtQuery.$gte = start;
-      createdAtQuery.$lte = end;
+      const start = parseDateISTStart(date);
+      const end = parseDateISTEnd(date);
+      query.date = { $gte: start, $lte: end };
     } else if (fromDate && toDate) {
-      const start = new Date(fromDate);
-      start.setHours(0, 0, 0, 0);
-
-      const end = new Date(toDate);
-      end.setHours(23, 59, 59, 999);
-
-      createdAtQuery.$gte = start;
-      createdAtQuery.$lte = end;
-    }
-
-    if (Object.keys(createdAtQuery).length > 0) {
-      query.createdAt = createdAtQuery;
+      const start = parseDateISTStart(fromDate);
+      const end = parseDateISTEnd(toDate);
+      query.date = { $gte: start, $lte: end };
     }
 
     // 🗄 DB call (newest first)
@@ -1007,9 +1102,18 @@ const getEntries = async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(parseInt(limit));
 
+    const mappedEntries = entries.map(e => {
+      const obj = e.toObject ? e.toObject() : e;
+      return {
+        ...obj,
+        number: obj.number || obj.num || obj.betNumber || "",
+        type: extractBaseType(obj.type)
+      };
+    });
+
     const response = {
-      data: entries,
-      lastTimestamp: entries.length > 0 ? entries[0].createdAt : after || null
+      data: mappedEntries,
+      lastTimestamp: entries.length > 0 ? entries[entries.length - 1].createdAt : after || null
     };
 
     // 💾 Cache only initial load
@@ -1053,7 +1157,16 @@ const getEntriesWithTimeBlock = async (req, res) => {
 
     if (createdBy) query.createdBy = createdBy;
     if (timeCode) query.timeCode = timeCode;
-    if (timeLabel) query.timeLabel = timeLabel;
+
+    if (timeLabel && timeLabel.toLowerCase() !== "all") {
+      const normalized = summaryLabelMap[timeLabel.trim()] || timeLabel.trim().toUpperCase();
+      if (normalized === "KERALA 3 PM") {
+        query.timeLabel = { $in: ["KERALA 3 PM", "LSK 3 PM"] };
+      } else {
+        query.timeLabel = timeLabel;
+      }
+    }
+
     if (number) query.number = number;
     if (count) query.count = parseInt(count);
     if (billNo) query.billNo = billNo;
@@ -1099,14 +1212,20 @@ const getEntriesWithTimeBlock = async (req, res) => {
       }
 
       entries.forEach(e => {
-        const drawKey = (e.timeLabel || "").trim().toUpperCase();
+        const obj = e.toObject ? e.toObject() : e;
+        const drawKey = (obj.timeLabel || "").trim().toUpperCase();
         const rateLookup = rateMastersByDrawKey[drawKey] || {};
-        const betType = extractBaseType(e.type);
+        const betType = extractBaseType(obj.type);
         const rate = rateLookup[betType] ?? getRateForType(betType);
 
         // Overwrite e.rate with the viewer's perspective (rate * count)
-        const entryCount = Number(e.count) || 0;
+        const entryCount = Number(obj.count) || 0;
         e.rate = (rate * entryCount).toFixed(2);
+
+        // Ensure frontend fields match getSalesReport
+        e.number = obj.number || obj.num || obj.betNumber || "";
+        e.num = e.number;
+        e.type = betType;
       });
     }
     let updatedEntries = entries
@@ -1153,8 +1272,8 @@ const invalidateEntry = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const updated = await Entry.findByIdAndUpdate(
-      id,
+    const updated = await Entry.findOneAndUpdate(
+      { _id: id, isValid: { $ne: false } }, // 🛡️ Only invalidate if it was valid
       { isValid: false },
       { new: true }
     );
@@ -1176,6 +1295,14 @@ const invalidateEntry = async (req, res) => {
     // 🟢 Clear caches to ensure immediate update in reports
     entriesCache.clear();
     reportCache.clear();
+
+    // 🟢 Sync Winning Summary
+    const updateDateStr = updated.date instanceof Date ? updated.date.toISOString().split('T')[0] : updated.date;
+    await saveWinningSummaryInternal({
+      date: updateDateStr,
+      timeLabel: updated.timeLabel,
+      agent: updated.createdBy
+    });
 
     res.status(200).json({ message: 'Marked as invalid' });
   } catch (err) {
@@ -1211,16 +1338,18 @@ const deleteEntryById = async (req, res) => {
       return res.status(400).json({ message: 'Cannot delete entry, Entry time is blocked for this draw' });
     }
 
-    // 🟢 Update SalesReportSummary incrementally (before deletion)
-    const oldCount = Number(obj.count) || 0;
-    const oldRate = Number(obj.rate || (obj.number.length === 1 ? 12 : 10) * oldCount);
+    if (obj.isValid !== false) {
+      // 🟢 Update SalesReportSummary incrementally (before deletion)
+      const oldCount = Number(obj.count) || 0;
+      const oldRate = Number(obj.rate || (obj.number.length === 1 ? 12 : 10) * oldCount);
 
-    const countDelta = -oldCount;
-    const amountDelta = -oldRate;
-    const scheme = extractBaseType(obj.type);
-    const dateStr = formatDateIST(new Date(obj.createdAt)); // 🔑 Use createdAt (transaction date)
+      const countDelta = -oldCount;
+      const amountDelta = -oldRate;
+      const scheme = extractBaseType(obj.type);
+      const dateStr = formatDateIST(new Date(obj.createdAt)); // 🔑 Use createdAt (transaction date)
 
-    await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
+      await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
+    }
 
     // 🟢 Refund limits
     await adjustEntryLimits(obj, -oldCount);
@@ -1230,6 +1359,14 @@ const deleteEntryById = async (req, res) => {
     // 🟢 Clear caches to ensure immediate update in reports
     entriesCache.clear();
     reportCache.clear();
+
+    // 🟢 Sync Winning Summary
+    const objDateStr = obj.date instanceof Date ? obj.date.toISOString().split('T')[0] : obj.date;
+    await saveWinningSummaryInternal({
+      date: objDateStr,
+      timeLabel: obj.timeLabel,
+      agent: obj.createdBy
+    });
 
     res.status(200).json({ message: 'Entry deleted successfully' });
   } catch (err) {
@@ -1251,6 +1388,8 @@ const deleteEntriesByBillNo = async (req, res) => {
 
     // 🟢 Update SalesReportSummary incrementally for each entry before deletion
     for (const obj of entriesToDelete) {
+      if (obj.isValid === false) continue; // 🛡️ ALREADY SUBTRACTED (SKIP TO AVOID NEGATIVE VALUES)
+
       const oldCount = Number(obj.count) || 0;
       const oldRate = Number(obj.rate || (obj.number.length === 1 ? 12 : 10) * oldCount);
 
@@ -1270,6 +1409,17 @@ const deleteEntriesByBillNo = async (req, res) => {
     // 🟢 Clear caches to ensure immediate update in reports
     entriesCache.clear();
     reportCache.clear();
+
+    // 🟢 Sync Winning Summary for the bills deleted
+    if (entriesToDelete.length > 0) {
+      const firstEntry = entriesToDelete[0];
+      const billDateStr = firstEntry.date instanceof Date ? firstEntry.date.toISOString().split('T')[0] : firstEntry.date;
+      await saveWinningSummaryInternal({
+        date: billDateStr,
+        timeLabel: firstEntry.timeLabel,
+        agent: firstEntry.createdBy
+      });
+    }
 
     res.status(200).json({ message: 'Entries deleted successfully' });
   } catch (err) {
@@ -1329,10 +1479,10 @@ const getResult = async (req, res) => {
       return res.status(400).json({ message: 'Missing date parameter' });
     }
 
-    let query = { time, date };
+    const searchLabels = getSearchLabels(time);
+    let query = { time: { $in: searchLabels }, date };
 
     // Find all matching result documents
-
     const resultDocs = await Result.find(query).lean();
     const resultDoc = await Result.find({}).lean();
     // console.log('resultDoc=>>>>>>>>>>>>>>>>', resultDoc)
@@ -1430,7 +1580,60 @@ const createUser = async (req, res) => {
 };
 
 
+// const saveResult = async (req, res) => {
+//   try {
+//     const { results } = req.body;
+
+//     const [date] = Object.keys(results);
+//     const [timeData] = results[date];
+//     const [time] = Object.keys(timeData);
+
+//     const { prizes, entries } = timeData[time];
+
+//     // ✅ Replace old result if same date & time exists
+//     const updatedResult = await Result.findOneAndUpdate(
+//       { date, time }, // search by date + time
+//       { prizes, entries }, // fields to update
+//       { upsert: true, new: true } // create if not exists, return updated
+//     );
+
+//     const agents = await Entry.distinct("createdBy", {
+//       timeLabel: time,
+//       createdAt: {
+//         $gte: parseDateISTStart(date),
+//         $lte: parseDateISTEnd(date)
+//       }
+//     });
+
+//     for (const agent of agents) {
+//       await saveWinningSummaryInternal({
+//         date,
+//         timeLabel: time,
+//         agent
+//       });
+//     }
+
+//     return res.status(200).json({
+//       message: "Result & winning summary saved successfully",
+//       result: updatedResult
+//     });
+
+
+//   } catch (err) {
+//     console.error('❌ Error saving result:', err);
+//     res.status(500).json({
+//       message: 'Error saving result',
+//       error: err.message
+//     });
+//   }
+// };
+
+
+
+// ✅ Add Entries
+
 const saveResult = async (req, res) => {
+  console.log("🔥 saveResult ROUTE HIT");
   try {
     const { results } = req.body;
 
@@ -1440,29 +1643,45 @@ const saveResult = async (req, res) => {
 
     const { prizes, entries } = timeData[time];
 
-    // ✅ Replace old result if same date & time exists
+    // ✅ Save / update result
     const updatedResult = await Result.findOneAndUpdate(
-      { date, time }, // search by date + time
-      { prizes, entries }, // fields to update
-      { upsert: true, new: true } // create if not exists, return updated
+      { date, time },
+      { prizes, entries },
+      { upsert: true, new: true }
     );
+    const searchLabels = getSearchLabels(time);
 
-    res.status(200).json({
-      message: 'Result saved successfully',
+    const agents = await Entry.distinct("createdBy", {
+      timeLabel: { $in: searchLabels },
+      date: {
+        $gte: parseDateISTStart(date),
+        $lte: parseDateISTEnd(date)
+      }
+    });
+
+    console.log("🧠 Agents found for results on", date, time, "(search:", searchLabels, "):", agents);
+    for (const agent of agents) {
+      console.log("💾 Saving winning summary for:", agent);
+      await saveWinningSummaryInternal({
+        date,
+        timeLabel: time,
+        agent
+      });
+    }
+
+    return res.status(200).json({
+      message: "Result & winning summary saved successfully",
       result: updatedResult
     });
+
   } catch (err) {
-    console.error('❌ Error saving result:', err);
+    console.error("❌ Error saving result:", err);
     res.status(500).json({
-      message: 'Error saving result',
+      message: "Error saving result",
       error: err.message
     });
   }
 };
-
-
-
-// ✅ Add Entries
 
 const addEntries = async (req, res) => {
   try {
@@ -1470,6 +1689,12 @@ const addEntries = async (req, res) => {
 
     if (!entries || entries.length === 0) {
       return res.status(400).json({ message: 'No entries provided' });
+    }
+
+    // 🛡️ Hierarchical Sales Block Check (Prevents and blocks descendants from placing bets if ancestor is sales-blocked)
+    const activeSellerForBlock = normalizeName(req.body.selectedAgent) || normalizeName(createdBy);
+    if (await isUserOrAncestorSalesBlocked(activeSellerForBlock)) {
+      return res.status(403).json({ message: 'Sales are blocked for this user or their master.' });
     }
     if (!date) {
       return res.status(400).json({ message: 'Date is required' });
@@ -1481,6 +1706,34 @@ const addEntries = async (req, res) => {
     // Use selectedAgent if provided (e.g. Admin or Master entering for a sub-agent)
     const activeSeller = normalizeName(req.body.selectedAgent) || normCreatedBy;
 
+    // 🛡️ Block Time logic
+    const activeUser = await MainUser.findOne({
+      username: { $regex: new RegExp(`^${createdBy}$`, "i") }
+    }).lean();
+    const usertype = activeUser?.usertype || 'sub';
+    const blockTimeData = await getBlockTimeF(timeLabel, usertype);
+
+    let targetDateStr = date;
+    if (blockTimeData) {
+      const { blockTime, unblockTime } = blockTimeData;
+      if (blockTime && unblockTime) {
+        const now = new Date();
+        const [bh, bm] = blockTime.split(':').map(Number);
+        const [uh, um] = unblockTime.split(':').map(Number);
+        const block = new Date(now.getFullYear(), now.getMonth(), now.getDate(), bh, bm);
+        const unblock = new Date(now.getFullYear(), now.getMonth(), now.getDate(), uh, um);
+
+        if (now >= block && now < unblock) {
+          return res.status(403).json({ message: 'Entry time is blocked for this draw' });
+        }
+        if (now >= unblock) {
+          const tomorrow = new Date(now);
+          tomorrow.setDate(tomorrow.getDate() + 1);
+          targetDateStr = formatDateIST(tomorrow);
+        }
+      }
+    }
+
     const toSave = entries.map(e => ({
       ...e,
       rate: e.rate || Number(e?.total || (e.number.length === 1 ? 12 : 10) * e.count).toFixed(2),
@@ -1490,57 +1743,75 @@ const addEntries = async (req, res) => {
       billNo,
       toggleCount,
       createdAt: new Date(),
-      date: new Date(date),
+      date: new Date(targetDateStr),
     }));
 
-    /*CREDIT LIMIT ENFORCEMENT */
+    /* CUMULATIVE CREDIT LIMIT ENFORCEMENT */
     const lookupLabel = normalizeDrawLabel(timeLabel);
-    const userLimitDoc = await UserAmount.findOne({
-      toUser: createdBy,
-      $or: [{ drawTime: lookupLabel }, { drawTime: "ALL" }]
-    }).sort({ drawTime: -1 }); // Priority: Specific Draw > ALL
+    const ancestors = await getAncestors(createdBy);
+    console.log(`[DEBUG] Ancestors for ${createdBy}:`, ancestors);
 
-    if (userLimitDoc) {
-      const limit = userLimitDoc.amount;
+    for (const ancestorName of ancestors) {
+      // ✅ Case-insensitive lookup for credit limit
+      const limitDoc = await UserAmount.findOne({
+        toUser: { $regex: new RegExp(`^${ancestorName}$`, 'i') },
+        $or: [{ drawTime: lookupLabel }, { drawTime: "ALL" }]
+      }).sort({ drawTime: -1 });
 
-      // Calculate current batch total
-      const currentBatchTotal = toSave.reduce((sum, e) => sum + Number(e.rate), 0);
+      if (limitDoc) {
+        const limit = limitDoc.amount;
+        console.log(`[DEBUG] Found LimitDoc for ${ancestorName}:`, limit);
 
-      // Calculate total sales already submitted today for this draw
-      // Normalize labels to catch both "LSK 3 PM" and "KERALA 3 PM"
-      const labelsToCheck = [timeLabel];
-      if (timeLabel === "LSK 3 PM") labelsToCheck.push("KERALA 3 PM");
-      if (timeLabel === "KERALA 3 PM") labelsToCheck.push("LSK 3 PM");
+        // Calculate cumulative sales for this ancestor and all their descendants
+        const descendants = await getAllDescendantsFlat(ancestorName);
+        const relatedUsers = [ancestorName, ...descendants];
+        console.log(`[DEBUG] Related users for ${ancestorName}:`, relatedUsers);
 
-      const startOfDay = parseDateISTStart(date);
-      const endOfDay = parseDateISTEnd(date);
+        const startOfDay = parseDateISTStart(date);
+        const endOfDay = parseDateISTEnd(date);
 
-      const existingEntries = await Entry.find({
-        createdBy,
-        date: { $gte: startOfDay, $lte: endOfDay },
-        timeLabel: { $in: labelsToCheck }
-      });
+        const labelsToCheck = [timeLabel];
+        if (timeLabel === "LSK 3 PM") labelsToCheck.push("KERALA 3 PM");
+        if (timeLabel === "KERALA 3 PM") labelsToCheck.push("LSK 3 PM");
 
-      const totalAlreadySold = existingEntries.reduce((sum, e) => sum + (Number(e.rate) || 0), 0);
-
-      if (totalAlreadySold + currentBatchTotal > limit) {
-        return res.status(400).json({
-          message: `Credit limit exceeded for ${timeLabel}.`,
-          details: {
-            limit,
-            alreadySold: totalAlreadySold.toFixed(2),
-            currentAttempt: currentBatchTotal.toFixed(2),
-            shortfall: (totalAlreadySold + currentBatchTotal - limit).toFixed(2)
-          }
+        const existingEntries = await Entry.find({
+          createdBy: { $in: relatedUsers },
+          date: { $gte: startOfDay, $lte: endOfDay },
+          timeLabel: { $in: labelsToCheck },
+          isValid: { $ne: false }
         });
+
+        const totalAlreadySold = existingEntries.reduce((sum, e) => sum + (Number(e.rate) || 0), 0);
+        const currentBatchTotal = toSave.reduce((sum, e) => sum + Number(e.rate), 0);
+        console.log(`[DEBUG] ${ancestorName} cumulative: alreadySold=${totalAlreadySold}, currentBatch=${currentBatchTotal}, limit=${limit}`);
+
+        if (totalAlreadySold + currentBatchTotal > limit) {
+          const isSelf = ancestorName.toLowerCase() === createdBy.toLowerCase();
+          const errorMsg = isSelf
+            ? `Credit limit exceeded for ${timeLabel}.`
+            : `Cumulative credit limit for ${ancestorName} exceeded for ${timeLabel}.`;
+
+          console.log(`[DEBUG] LIMIT EXCEEDED for ${ancestorName}`);
+          return res.status(400).json({
+            message: errorMsg,
+            details: {
+              ancestor: ancestorName,
+              limit,
+              alreadySold: totalAlreadySold.toFixed(2),
+              currentAttempt: currentBatchTotal.toFixed(2),
+              shortfall: (totalAlreadySold + currentBatchTotal - limit).toFixed(2)
+            }
+          });
+        }
+      } else {
+        console.log(`[DEBUG] No LimitDoc found for ancestor: ${ancestorName} (Draw: ${lookupLabel})`);
       }
     }
 
     await Entry.insertMany(toSave);
 
-    // 🟢 Update SalesReportSummary automatically (using transaction date to match accounting expectations)
-    const transactionDateStr = formatDateIST(new Date());
-    await updateAutomaticSummary(createdBy, transactionDateStr, timeLabel, timeCode, toSave);
+    // 🟢 Update SalesReportSummary automatically (using targetDateStr)
+    await updateAutomaticSummary(createdBy, targetDateStr, timeLabel, timeCode, toSave);
 
     // 🟢 Clear caches to ensure immediate update in reports
     entriesCache.clear();
@@ -1751,7 +2022,7 @@ const getAllUsers = async (req, res) => {
     const query = createdBy ? { createdBy } : {};
 
     // Use .lean() for better performance when we need to modify the objects
-    const users = await MainUser.find(query).select('-password -nonHashedPassword').lean();
+    const users = await MainUser.find(query).select('-password').lean();
 
     // Fetch all users to build the parent map for hierarchy calculation
     const allUsers = await MainUser.find().select('username createdBy').lean();
@@ -1788,7 +2059,7 @@ const getusersByid = async (req, res) => {
       return res.status(400).json({ message: 'User _id is required' });
     }
 
-    const user = await MainUser.findById(id).select('-password -nonHashedPassword').lean();
+    const user = await MainUser.findById(id).select('-password').lean();
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -1831,52 +2102,8 @@ const payouts = {
   A_B_C: 100,
 };
 
-// Helper function to calculate win amount
-// Helper function to calculate win amount dynamically based on Schema
-const calculateWinAmount = (entry, results, schemeData) => {
-  if (!results || !results["1"]) return 0;
+// Helper functions moved to winningUtils.js
 
-  const baseType = extractBaseType(entry.type);
-  const winType = computeWinType(entry, results);
-  if (!winType) return 0;
-
-  // Find the group in schemeData that matches this baseType
-  let targetGroup = "";
-  if (baseType === "A" || baseType === "B" || baseType === "C") {
-    targetGroup = "Group 1";
-  } else if (["AB", "BC", "AC"].includes(baseType)) {
-    targetGroup = "Group 2";
-  } else if (baseType === "SUPER") {
-    targetGroup = "Group 3-SUPER";
-  } else if (baseType === "BOX") {
-    targetGroup = "Group 3-BOX";
-  }
-
-  const group = (schemeData?.schemes || []).find(g => g.group === targetGroup);
-  if (!group) return 0;
-
-  let row;
-  if (baseType === "SUPER" || baseType === "BOX") {
-    const match = winType.match(/(\d+)/); // Extracts 1, 2, 3...
-    const pos = match
-      ? parseInt(match[1], 10)
-      : (winType.toLowerCase().includes("other") || winType.toLowerCase().includes("permutation") ? 6 : 1);
-    row = group.rows.find(r => r.pos === pos);
-
-    // Box fallback for non-doubles if pos > 1
-    if (!row && baseType === "BOX" && pos <= 1) {
-      row = group.rows[0]; // Default to first row
-    }
-  } else {
-    row = group.rows.find(r => r.scheme === baseType);
-  }
-
-  if (row) {
-    return (row.amount || 0) * (entry.count || 0);
-  }
-
-  return 0;
-};
 
 // Pseudocode based on your frontend logic
 const drawLabelMap = {
@@ -1920,7 +2147,7 @@ const netPayMultiday = async (req, res) => {
 
     let entryQuery = {
       createdBy: { $in: agentUsers },
-      createdAt: { $gte: start, $lte: end },
+      date: { $gte: start, $lte: end },
       isValid: true
     };
 
@@ -1994,8 +2221,56 @@ const netPayMultiday = async (req, res) => {
       req.body.loggedInUser
     );
     // console.log('userRates=>>>>>>>>>>>>>>>>', userRates)
+    // Dynamic Scheme Resolution
+    const fromAccountSummary = !!req.body.fromAccountSummary;
+    const viewerName = loggedInUser || agent || "Admin";
+    const viewer = users.find(u => u.username === viewerName);
+    const viewerSchemeId = viewer?.scheme || "Scheme 1";
+
+    /**
+     * Cache for Schema data.
+     * Key: `drawName|schemeId`
+     */
+    const schemeCache = {};
+
+    /**
+     * Helper to pre-fetch scheme data into schemeCache.
+     */
+    const preFetchScheme = async (drawLabel, schemeId) => {
+      const cacheKey = `${drawLabel}|${schemeId}`;
+      if (schemeCache[cacheKey]) return;
+
+      const normalizedLabel = summaryLabelMap[drawLabel.toUpperCase()] || drawLabel;
+      const searchLabels = getSearchLabels(normalizedLabel);
+      const activeTabNum = parseInt(schemeId.replace(/[^0-9]/g, ""), 10) || 1;
+
+      const schemaDoc = await Schema.findOne(
+        { activeTab: activeTabNum, "draws.drawName": { $in: searchLabels } },
+        { draws: { $elemMatch: { drawName: { $in: searchLabels } } } }
+      ).lean();
+
+      if (schemaDoc && schemaDoc.draws && schemaDoc.draws[0]) {
+        schemeCache[cacheKey] = { schemes: schemaDoc.draws[0].schemes };
+      }
+    };
+
+    // Pre-fetch based on fromAccountSummary flag
+    if (fromAccountSummary) {
+      // Fetch creator's scheme for each unique (draw, scheme) pair
+      for (const entry of entries) {
+        const creatorScheme = userSchemeMap[entry.createdBy] || "Scheme 1";
+        await preFetchScheme(entry.timeLabel, creatorScheme);
+      }
+    } else {
+      // Use viewer's scheme for ALL entries
+      const uniqueEntryDraws = [...new Set(entries.map(e => e.timeLabel))];
+      for (const label of uniqueEntryDraws) {
+        await preFetchScheme(label, viewerSchemeId);
+      }
+    }
+
     const processedEntries = entries.map(entry => {
-      const entryDateStr = formatDateIST(new Date(entry.createdAt));
+      const entryDateStr = formatDateIST(new Date(entry.date)); // Use entry.date (Draw Date)
       // Normalize entry draw label to align with result keys (e.g., LSK 3 PM -> KERALA 3PM)
       const normalizedLabel = stripSpaceBeforeMeridiem(normalizeDrawLabel(entry.timeLabel));
       const dayResult = resultByDateTime[`${entryDateStr}_${normalizedLabel}`] || null;
@@ -2018,27 +2293,49 @@ const netPayMultiday = async (req, res) => {
       // Normalize the draw label to match how it's stored in getUserRates
       const normalizedRateDrawLabel = stripSpaceBeforeMeridiem(normalizeDrawLabel(entry.timeLabel));
       // console.log('normalizedRateDrawLabel', normalizedRateDrawLabel)
-      const drawRateMap = (isAllTime || isArrayTime)
-        ? (userRateMap[normalizedRateDrawLabel] || {})
-        : (userRateMap[normalizedLabel] || userRateMap[time] || {});
-
       const betType = extractBaseType(entry.type);
-      // console.log('drawRateMap', drawRateMap)
-      // console.log('betType', betType)
-      const rate = drawRateMap[betType] ?? 10;
-      // console.log('rate', rate)
-      const winAmount = calculateWinAmount(entry, normalizedResult);
-      // console.log('winAmount', winAmount)
-      const winType = computeWinType(entry, normalizedResult);
-      // console.log('winType', winType)
+      const count = Number(entry.count) || 0;
+      const drawRateMap = userRateMap[normalizedRateDrawLabel] || {};
+      const appliedRate = drawRateMap[betType] ?? 10;
+      const calculatedAmount = count * appliedRate;
+
+      // Use correct scheme ID for lookup
+      const effectiveSchemeId = fromAccountSummary
+        ? (userSchemeMap[entry.createdBy] || "Scheme 1")
+        : viewerSchemeId;
+
+      const targetDrawScheme = schemeCache[`${entry.timeLabel}|${effectiveSchemeId}`];
+
+      // Safety fallback prizes if viewer's scheme is missing them (e.g. AB/BC/AC are exactly 30)
+      const fallbackPrizes = {
+        "AB": 30, "BC": 30, "AC": 30,
+        "A": 0, "B": 0, "C": 0,
+        "SUPER 1": 400, "SUPER 2": 50, "SUPER 3": 20, "SUPER 4": 20, "SUPER 5": 20, "SUPER other": 10,
+        "BOX perfect": 300, "BOX permutation": 30
+      };
+
+      const wins = calculateWinAmountFull(entry, normalizedResult, targetDrawScheme, fallbackPrizes) || [];
+
+      let prize = 0;
+      let superPrize = 0;
+      let winTypesArr = [];
+
+      wins.forEach(w => {
+        prize += (w.prize || 0);
+        superPrize += (w.superPrize || 0);
+        if (w.winType) winTypesArr.push(w.winType);
+      });
+
+      const winType = winTypesArr.join(', ');
 
       return {
         ...entry.toObject(),
-        winAmount,
+        winAmount: prize,
+        superAmount: superPrize,
         winType,
         scheme: userSchemeMap[entry.createdBy] || "Scheme 1",
-        appliedRate: rate,
-        calculatedAmount: rate * (Number(entry.count) || 0),
+        appliedRate: Number(appliedRate.toFixed(2)),
+        calculatedAmount: calculatedAmount, // 🔄 Reverted to viewer-calculated rate
         date: entryDateStr
       };
     });
@@ -2282,52 +2579,7 @@ function normalizeResultDocs(resultDocs) {
   return grouped;
 }
 
-function computeWinType(entry, results) {
-  if (!results) return "";
-  const baseType = extractBaseType(entry.type);
-  const num = entry.number;
-  const first = results["1"];
-  const others = results.others || [];
-
-  if (baseType === "SUPER") {
-    if (num === results["1"]) return "SUPER 1";
-    if (num === results["2"]) return "SUPER 2";
-    if (num === results["3"]) return "SUPER 3";
-    if (num === results["4"]) return "SUPER 4";
-    if (num === results["5"]) return "SUPER 5";
-    if (others.includes(num)) return "SUPER other";
-    return "";
-  }
-
-  if (baseType === "BOX") {
-    const sortStr = (s) => s.split("").sort().join("");
-    const numSorted = sortStr(num);
-
-    // 1. Check Prizes 1-5
-    for (let i = 1; i <= 5; i++) {
-      const prize = results[String(i)];
-      if (!prize) continue;
-
-      if (num === prize) {
-        return i === 1 ? "BOX perfect" : `BOX ${i} perfect`;
-      }
-      if (numSorted === sortStr(prize)) {
-        return "BOX permutation"; // Any permutation goes to Pos 6
-      }
-    }
-
-    // 2. Check Others
-    for (const other of others) {
-      if (num === other || numSorted === sortStr(other)) {
-        return "BOX other"; // Any "other" match goes to Pos 6
-      }
-    }
-    return "";
-  }
-
-  if (["AB", "BC", "AC", "A", "B", "C"].includes(baseType)) return baseType;
-  return "";
-}
+// computeWinType moved to winningUtils.js
 function getDatesBetween(start, end) {
   const dates = [];
   const curr = new Date(start);
@@ -2575,11 +2827,12 @@ const getWinningReport = async (req, res) => {
     const entryQuery = {
       createdBy: { $in: agentUsers },
       isValid: true,
-      createdAt: { $gte: start, $lte: end },
+      date: { $gte: start, $lte: end },
     };
 
     if (time !== "ALL") {
-      entryQuery.timeLabel = new RegExp(time, "i");
+      const searchLabels = getSearchLabels(time);
+      entryQuery.timeLabel = { $in: searchLabels };
     }
 
     const entries = await Entry.find(entryQuery).lean();
@@ -2656,25 +2909,29 @@ const getWinningReport = async (req, res) => {
     const winningEntries = [];
 
     for (const e of entries) {
-      const ds = formatDateIST(new Date(e.createdAt));
+      const ds = formatDateIST(new Date(e.date)); // Use DESIGNATED draw date for result lookup
       const dayResult = findDayResult(ds, e.timeLabel);
 
       if (!dayResult) continue;
 
       // Use Report Head's specific scheme data for this draw
       const drawSchemeData = schemeCacheInternal[e.timeLabel];
-      const winAmount = calculateWinAmount(e, dayResult, drawSchemeData);
+      const wins = calculateWinAmountFull(e, dayResult, drawSchemeData);
 
-      if (winAmount <= 0) continue;
+      if (!wins || wins.length === 0) continue;
 
-      winningEntries.push({
-        ...e,
-        date: ds,
-        winAmount,
-        baseType: extractBaseType(e.type),
-        winType: computeWinType(e, dayResult),
-        name: e.name || "-"
-      });
+      for (const win of wins) {
+        winningEntries.push({
+          ...e,
+          date: ds,
+          winAmount: win.prize,
+          superAmount: win.superPrize,
+          totalRate: win.prize + win.superPrize,
+          baseType: extractBaseType(e.type),
+          winType: win.winType,
+          name: e.name || "-"
+        });
+      }
     }
 
     if (!winningEntries.length) {
@@ -2714,8 +2971,11 @@ const getWinningReport = async (req, res) => {
         winType: w.winType,
         count: w.count,
         winAmount: w.winAmount,
+        superAmount: w.superAmount, // Frontend needs this for super display
         name: w.name,
-        drawName: w.timeLabel || "N/A" // Added drawName to winnings too just in case
+        drawName: w.timeLabel || "N/A", // Added drawName to winnings too just in case
+        timeLabel: w.timeLabel, // Consistent naming
+        createdAt: w.createdAt, // For sorting/display
       });
 
       billsMap[w.billNo].total += w.winAmount;
@@ -3067,64 +3327,105 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, selectedAgent, create
 
 const saveValidEntries = async (req, res) => {
   try {
-    const { entries, timeLabel, timeCode, selectedAgent, createdBy, toggleCount, loggedInUserType, loggedInUser } = req.body;
-    // console.log('req.body;============', req.body)
+
+    const {
+      entries,
+      timeLabel,
+      timeCode,
+      selectedAgent,
+      createdBy,
+      toggleCount,
+      loggedInUserType,
+      loggedInUser
+    } = req.body;
+
     if (!entries || entries.length === 0) {
-      return res.status(400).json({ message: 'No entries provided' });
+      return res.status(400).json({ message: "No entries provided" });
     }
+
     const now = new Date();
     const todayStr = formatDateIST(now);
     const normalizedLabel = normalizeDrawLabelLimit(timeLabel);
-    // console.log('normalizedLabel==============', normalizedLabel);
-    // 1️⃣ Get block/unblock time
-    const blockTimeData = await getBlockTimeF(timeLabel, loggedInUserType);
-    if (!blockTimeData) {
-      return res.status(400).json({ message: `No block time configuration found for draw: ${timeLabel}` });
-    }
-    const { blockTime, unblockTime } = blockTimeData;
-    if (!blockTime || !unblockTime) return res.status(400).json({ message: 'Block or unblock time missing' });
 
-    const [bh, bm] = blockTime.split(':').map(Number);
-    const [uh, um] = unblockTime.split(':').map(Number);
+    /* ---------------- BLOCK TIME ---------------- */
+
+    const blockTimeData = await getBlockTimeF(timeLabel, loggedInUserType);
+
+    if (!blockTimeData) {
+      return res.status(400).json({
+        message: `No block time configuration found for draw: ${timeLabel}`
+      });
+    }
+
+    const { blockTime, unblockTime } = blockTimeData;
+
+    const [bh, bm] = blockTime.split(":").map(Number);
+    const [uh, um] = unblockTime.split(":").map(Number);
 
     const block = new Date(now.getFullYear(), now.getMonth(), now.getDate(), bh, bm);
     const unblock = new Date(now.getFullYear(), now.getMonth(), now.getDate(), uh, um);
 
     if (now >= block && now < unblock) {
-      return res.status(403).json({ message: 'Entry time is blocked for this draw' });
+      return res.status(403).json({
+        message: "Entry time is blocked for this draw"
+      });
     }
 
-    // Decide target date: after unblock -> next day, else today
     const targetDateObj = new Date(now);
+
     if (now >= unblock) {
       targetDateObj.setDate(targetDateObj.getDate() + 1);
     }
+
     const targetDateStr = formatDateIST(targetDateObj);
 
-    // 2️⃣ Check Blocked Date for the target date
-    const blockedDates = await BlockDate.findOne({ date: targetDateStr, ticket: normalizedLabel });
+    /* ---------------- BLOCK DATE ---------------- */
+
+    const blockedDates = await BlockDate.findOne({
+      date: targetDateStr,
+      ticket: normalizedLabel
+    });
+
     if (blockedDates) {
-      return res.status(400).json({ message: `Entries are blocked for ${targetDateStr} for this ticket.` });
+      return res.status(400).json({
+        message: `Entries are blocked for ${targetDateStr} for this ticket.`
+      });
     }
 
-    // 3️⃣ Fetch ticket limits
+    /* ---------------- TICKET LIMIT ---------------- */
+
     const limits = await getTicketLimits();
+
     if (!limits) {
-      return res.status(400).json({ message: 'No ticket limits configuration found. Please set up ticket limits first.' });
+      return res.status(400).json({
+        message: "No ticket limits configuration found. Please set up ticket limits first."
+      });
     }
+
     const allLimits = { ...limits.group1, ...limits.group2, ...limits.group3 };
 
-    // 3️⃣ Expansion Logic (Range & Set)
+    /* ---------------- EXPAND ENTRIES ---------------- */
+
     const expandedEntries = [];
+
     for (const entry of entries) {
+
       if (entry.rangeStart !== undefined && entry.rangeEnd !== undefined) {
-        // Expand range
+
         const start = parseInt(entry.rangeStart, 10);
         const end = parseInt(entry.rangeEnd, 10);
-        const width = entry.toggleCount === 1 ? 1 : entry.toggleCount === 2 ? 2 : 3;
+
+        const width =
+          entry.toggleCount === 1
+            ? 1
+            : entry.toggleCount === 2
+            ? 2
+            : 3;
 
         for (let i = start; i <= end; i++) {
-          const numStr = String(i).padStart(width, '0');
+
+          const numStr = String(i).padStart(width, "0");
+
           if (entry.isSet) {
             const perms = getPermutationsF(numStr);
             perms.forEach(p => expandedEntries.push({ ...entry, number: p }));
@@ -3132,212 +3433,249 @@ const saveValidEntries = async (req, res) => {
             expandedEntries.push({ ...entry, number: numStr });
           }
         }
+
       } else if (entry.isSet && entry.number) {
-        // Expand permutations for a single number
+
         const perms = getPermutationsF(entry.number);
         perms.forEach(p => expandedEntries.push({ ...entry, number: p }));
+
       } else {
         expandedEntries.push(entry);
       }
     }
 
-    // 4️⃣ Sum counts per type-number for new entries
-    const newTotalByNumberType = {};
-    expandedEntries.forEach((entry) => {
-      const rawType = entry.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
-      const key = `${rawType}-${entry.number}`;
-      newTotalByNumberType[key] = (newTotalByNumberType[key] || 0) + (entry.count || 1);
+    /* ---------------- CACHE TYPES ---------------- */
+
+    expandedEntries.forEach(e => {
+      e.rawType = extractBaseType(e.type);
+      e.rawTime = extractBetTypeTime(e.type);
     });
 
-    // 5️⃣ Fetch remaining from DailyLimitUsage
-    const keys = Object.keys(newTotalByNumberType);
-    const remainingMap = await countByUsageF(targetDateStr, keys);
-    const generalActualUsageMap = await getGeneralActualUsageMap(targetDateStr, keys);
+    /* ---------------- PREPARE KEYS ---------------- */
 
-    // 6️⃣ Validate entries
+    const newTotalByNumberType = {};
+
+    expandedEntries.forEach(entry => {
+      const key = `${entry.rawType}-${entry.number}`;
+      newTotalByNumberType[key] =
+        (newTotalByNumberType[key] || 0) + (entry.count || 1);
+    });
+
+    const keys = Object.keys(newTotalByNumberType);
+
+    /* ---------------- PARALLEL QUERIES ---------------- */
+
+    const [remainingMap, generalActualUsageMap] = await Promise.all([
+      countByUsageF(targetDateStr, keys),
+      getGeneralActualUsageMap(targetDateStr, keys)
+    ]);
+
+    /* ---------------- PRELOAD BLOCK NUMBERS ---------------- */
+
+    const numbers = [...new Set(expandedEntries.map(e => e.number))];
+    const types = [...new Set(expandedEntries.map(e => e.rawType))];
+    const times = [...new Set(expandedEntries.map(e => e.rawTime))];
+
+    const blockedNumbers = await BlockNumber.find({
+      field: { $in: types },
+      number: { $in: numbers },
+      drawTime: { $in: times },
+      createdBy: loggedInUser,
+      isActive: true
+    }).lean();
+
+    const blockMap = {};
+
+    blockedNumbers.forEach(b => {
+      blockMap[`${b.field}-${b.number}-${b.drawTime}`] = b;
+    });
+
+    /* ---------------- VALIDATION ---------------- */
+
     let validEntries = [];
-    const exceededMap = {}; // key -> { key, attempted, exceeded, added, reason }
+    const exceededMap = {};
     const usedInGeneralBatchByNumber = {};
 
-    // PASS 1: General Daily Limits
     for (const entry of expandedEntries) {
+
       const count = entry.count || 1;
-      const rawType = entry.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
-      const number = entry.number;
-      const key = `${rawType}-${number}`;
+      const key = `${entry.rawType}-${entry.number}`;
 
       if (!exceededMap[key]) {
-        exceededMap[key] = { key, attempted: 0, exceeded: 0, added: 0, reason: '', limit: 0 };
+        exceededMap[key] = {
+          key,
+          attempted: 0,
+          exceeded: 0,
+          added: 0,
+          reason: "",
+          limit: 0
+        };
       }
+
       exceededMap[key].attempted += count;
 
-      const maxLimit = parseInt(allLimits[rawType] || '9999', 10);
+      const maxLimit = parseInt(allLimits[entry.rawType] || "9999", 10);
       exceededMap[key].limit = maxLimit;
+
       const remainingFromDb = remainingMap[key]?.remaining;
 
-      // 🛡️ EFFECTIVE REMAINING (GENERAL)
       const usedToday = generalActualUsageMap[key] || 0;
-      const effectiveRemaining = Math.max(typeof remainingFromDb === 'number' ? remainingFromDb : 0, maxLimit - usedToday);
-      const remainingForBatch = Math.max(0, effectiveRemaining - (usedInGeneralBatchByNumber[key] || 0));
+
+      const effectiveRemaining = Math.max(
+        typeof remainingFromDb === "number" ? remainingFromDb : 0,
+        maxLimit - usedToday
+      );
+
+      const remainingForBatch = Math.max(
+        0,
+        effectiveRemaining - (usedInGeneralBatchByNumber[key] || 0)
+      );
 
       if (remainingForBatch <= 0) {
         exceededMap[key].exceeded += count;
-        exceededMap[key].reason = 'Daily limit reached';
+        exceededMap[key].reason = "Daily limit reached";
         continue;
       }
 
       const willAdd = Math.min(count, remainingForBatch);
+
       if (willAdd < count) {
-        exceededMap[key].exceeded += (count - willAdd);
+
+        exceededMap[key].exceeded += count - willAdd;
         exceededMap[key].added += willAdd;
-        exceededMap[key].reason = 'Daily limit partial';
+        exceededMap[key].reason = "Daily limit partial";
+
         validEntries.push({ ...entry, count: willAdd });
-        usedInGeneralBatchByNumber[key] = (usedInGeneralBatchByNumber[key] || 0) + willAdd;
+
+        usedInGeneralBatchByNumber[key] =
+          (usedInGeneralBatchByNumber[key] || 0) + willAdd;
+
       } else {
+
         exceededMap[key].added += count;
+
         validEntries.push(entry);
-        usedInGeneralBatchByNumber[key] = (usedInGeneralBatchByNumber[key] || 0) + count;
+
+        usedInGeneralBatchByNumber[key] =
+          (usedInGeneralBatchByNumber[key] || 0) + count;
       }
     }
 
+    /* ---------------- USER BLOCK VALIDATION ---------------- */
 
-    // 7️⃣ Enforce strict per-user BlockNumber limit
-    // PASS 2: Strict User Blocked Numbers
     let nextValidEntries = [];
+
     for (const entry of validEntries) {
-      const rawTypes = await extractBaseType(entry.type);
-      const rawTime = await extractBetTypeTime(entry.type);
-      const number = entry.number;
-      const key = `${rawTypes}-${number}`;
 
-      const blocked = await BlockNumber.findOne({
-        field: rawTypes,
-        number,
-        drawTime: rawTime,
-        createdBy: loggedInUser,
-        isActive: true, // Only fetch ACTIVE blocks
-      });
+      const key = `${entry.rawType}-${entry.number}`;
+      const blockKey = `${entry.rawType}-${entry.number}-${entry.rawTime}`;
 
-      if (blocked && blocked.isActive && blocked.count < entry.count) {
+      const blocked = blockMap[blockKey];
+
+      if (blocked && blocked.count < entry.count) {
+
         const allowed = Math.max(0, blocked.count);
         const removed = entry.count - allowed;
 
         exceededMap[key].exceeded += removed;
         exceededMap[key].added -= removed;
-        exceededMap[key].reason = 'User blocked number';
+        exceededMap[key].reason = "User blocked number";
         exceededMap[key].limit = blocked.count;
 
         if (allowed > 0) {
           nextValidEntries.push({ ...entry, count: allowed });
         }
+
       } else {
         nextValidEntries.push(entry);
       }
     }
+
     validEntries = nextValidEntries;
 
-    // PASS 3: User Daily Usage Limits
-    const keysForUserUsage = [...new Set(validEntries.map(e => `${extractBaseType(e.type)}-${e.number}`))];
-    const userRemainingMap = await countByUserUsageF(targetDateStr, loggedInUser, keysForUserUsage);
+    /* ---------------- USER DAILY LIMIT ---------------- */
 
-    // 🔥 SELF-HEALING: Fetch actual usage to ensure we never have stale "remaining" values
-    const actualUsageMap = await getActualUsageMap(targetDateStr, loggedInUser, keysForUserUsage);
+    const keysForUserUsage = [
+      ...new Set(validEntries.map(e => `${e.rawType}-${e.number}`))
+    ];
+
+    const [userRemainingMap, actualUsageMap] = await Promise.all([
+      countByUserUsageF(targetDateStr, loggedInUser, keysForUserUsage),
+      getActualUsageMap(targetDateStr, loggedInUser, keysForUserUsage)
+    ]);
 
     nextValidEntries = [];
-    const usedInBatchByNumber = {}; // track use within this batch to subtract correctly
+    const usedInBatchByNumber = {};
 
     for (const entry of validEntries) {
-      const rawTypes = extractBaseType(entry.type);
-      const number = entry.number;
-      const key = `${rawTypes}-${number}`;
 
-      const block = await BlockNumber.findOne({ field: rawTypes, number, drawTime: extractBetTypeTime(entry.type), createdBy: loggedInUser, isActive: true });
-      const maxLimit = (block && block.isActive) ? block.count : parseInt(allLimits[rawTypes] || '9999', 10);
+      const key = `${entry.rawType}-${entry.number}`;
 
-      const remainingFromDb = typeof userRemainingMap[key]?.remaining === 'number'
-        ? userRemainingMap[key].remaining
-        : maxLimit;
+      const block = blockMap[`${entry.rawType}-${entry.number}-${entry.rawTime}`];
 
-      // 🛡️ EFFECTIVE REMAINING: Sync with actual database state
+      const maxLimit =
+        block && block.isActive
+          ? block.count
+          : parseInt(allLimits[entry.rawType] || "9999", 10);
+
+      const remainingFromDb =
+        typeof userRemainingMap[key]?.remaining === "number"
+          ? userRemainingMap[key].remaining
+          : maxLimit;
+
       const usedToday = actualUsageMap[key] || 0;
-      const effectiveRemaining = Math.max(remainingFromDb, maxLimit - usedToday);
-      const remainingForBatch = Math.max(0, effectiveRemaining - (usedInBatchByNumber[key] || 0));
+
+      const effectiveRemaining = Math.max(
+        remainingFromDb,
+        maxLimit - usedToday
+      );
+
+      const remainingForBatch = Math.max(
+        0,
+        effectiveRemaining - (usedInBatchByNumber[key] || 0)
+      );
 
       if (entry.count > remainingForBatch) {
+
         const allowed = Math.max(0, remainingForBatch);
         const removed = entry.count - allowed;
 
         exceededMap[key].exceeded += removed;
         exceededMap[key].added -= removed;
-        exceededMap[key].reason = 'User daily limit';
+        exceededMap[key].reason = "User daily limit";
         exceededMap[key].limit = maxLimit;
 
         if (allowed > 0) {
           nextValidEntries.push({ ...entry, count: allowed });
-          usedInBatchByNumber[key] = (usedInBatchByNumber[key] || 0) + allowed;
+          usedInBatchByNumber[key] =
+            (usedInBatchByNumber[key] || 0) + allowed;
         }
+
       } else {
+
         nextValidEntries.push(entry);
-        usedInBatchByNumber[key] = (usedInBatchByNumber[key] || 0) + entry.count;
+
+        usedInBatchByNumber[key] =
+          (usedInBatchByNumber[key] || 0) + entry.count;
       }
     }
+
     validEntries = nextValidEntries;
 
     const allExceeded = Object.values(exceededMap).filter(e => e.exceeded > 0);
 
     if (validEntries.length === 0) {
-      const message = allExceeded.map(e => `${e.key}: Blocked ${e.exceeded} (${e.reason})`).join('\n');
-      return res.status(400).json({ message: 'All entries failed validation:\n' + message, exceeded: allExceeded });
-    }
+      const message = allExceeded
+        .map(e => `${e.key}: Blocked ${e.exceeded} (${e.reason})`)
+        .join("\n");
 
-
-    /* =========================================
-       🛡️ CREDIT LIMIT ENFORCEMENT
-       ========================================== */
-    const lookupLabel = normalizeDrawLabel(timeLabel);
-    const userLimitDoc = await UserAmount.findOne({
-      toUser: createdBy,
-      $or: [{ drawTime: lookupLabel }, { drawTime: "ALL" }]
-    }).sort({ drawTime: -1 }); // Priority: Specific Draw > ALL
-
-    if (userLimitDoc) {
-      const limit = userLimitDoc.amount;
-
-      // Calculate current batch total
-      const currentBatchTotal = validEntries.reduce((sum, e) => {
-        const rate = e.rate || (e?.total || (e.number.length === 1 ? 12 : 10) * e.count);
-        return sum + Number(rate);
-      }, 0);
-
-      // Calculate total sales already submitted today for this draw
-      // Normalize labels to catch both "LSK 3 PM" and "KERALA 3 PM"
-      const labelsToCheck = [timeLabel];
-      if (timeLabel === "LSK 3 PM") labelsToCheck.push("KERALA 3 PM");
-      if (timeLabel === "KERALA 3 PM") labelsToCheck.push("LSK 3 PM");
-
-      const startOfDay = parseDateISTStart(targetDateStr);
-      const endOfDay = parseDateISTEnd(targetDateStr);
-
-      const existingEntries = await Entry.find({
-        createdBy,
-        date: { $gte: startOfDay, $lte: endOfDay },
-        timeLabel: { $in: labelsToCheck }
+      return res.status(400).json({
+        message: "All entries failed validation:\n" + message,
+        exceeded: allExceeded
       });
-
-      const totalAlreadySold = existingEntries.reduce((sum, e) => sum + (Number(e.rate) || 0), 0);
-
-      if (totalAlreadySold + currentBatchTotal > limit) {
-        return res.status(400).json({
-          message: `Credit limit exceeded for ${timeLabel}.`,
-          details: {
-            limit,
-            alreadySold: totalAlreadySold.toFixed(2),
-            currentAttempt: currentBatchTotal.toFixed(2),
-            shortfall: (totalAlreadySold + currentBatchTotal - limit).toFixed(2)
-          }
-        });
-      }
     }
+
+    /* ---------------- SAVE ENTRIES ---------------- */
 
     const savedBill = await addEntriesF({
       entries: validEntries,
@@ -3348,50 +3686,23 @@ const saveValidEntries = async (req, res) => {
       toggleCount,
       date: targetDateStr
     });
-    // console.log('savedBill', savedBill)
 
-    // 8️⃣ Upsert DailyLimitUsage remaining per (date,type,number)
-    // We must decrement remaining by saved counts, initializing with TicketLimit on first write
-    // const usageByType = {};
-    // validEntries.forEach((e) => {
-    //   const rawType = e.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
-    //   usageByType[rawType] = (usageByType[rawType] || 0) + (e.count || 1);
-    // });
+    /* ---------------- UPDATE LIMIT USAGE ---------------- */
+
     const usageByTypeNumber = {};
-    validEntries.forEach((e) => {
-      const rawType = e.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
-      const number = e.number;
-      const key = `${rawType}-${number}`;
-      usageByTypeNumber[key] = (usageByTypeNumber[key] || 0) + (e.count || 1);
+
+    validEntries.forEach(e => {
+      const key = `${e.rawType}-${e.number}`;
+      usageByTypeNumber[key] =
+        (usageByTypeNumber[key] || 0) + (e.count || 1);
     });
 
-    // const ops = Object.entries(usageByType).map(([t, used]) => {
-    //   const max = parseInt(allLimits[t] || '9999', 10);
-    //   return {
-    //     updateOne: {
-    //       filter: { date: targetDateStr, type: t },
-    //       update: [
-    //         {
-    //           $set: {
-    //             remaining: {
-    //               $let: {
-    //                 vars: { curr: "$remaining" },
-    //                 in: {
-    //                   $max: [0, { $subtract: [{ $ifNull: ["$$curr", max] }, used] }]
-    //                 }
-    //               }
-    //             }
-    //           }
-    //         }
-    //       ],
-    //       upsert: true,
-    //     }
-    //   };
-    // });
     const ops = Object.entries(usageByTypeNumber).map(([key, used]) => {
-      const [rawType, number] = key.split('-');
-      const max = parseInt(allLimits[rawType] || '9999', 10);
+
+      const [rawType, number] = key.split("-");
+      const max = parseInt(allLimits[rawType] || "9999", 10);
       const usedToday = generalActualUsageMap[key] || 0;
+
       const newRemaining = Math.max(0, max - (usedToday + used));
 
       return {
@@ -3407,61 +3718,41 @@ const saveValidEntries = async (req, res) => {
       await DailyLimitUsage.bulkWrite(ops);
     }
 
-    // Per-user daily limit update
-    // Update DailyUserLimit by setting the NEW remaining value after this save
-    const userSummaryMap = {}; // number-type -> totalCountInBatch
-    validEntries.forEach((e) => {
-      const key = `${extractBaseType(e.type)}-${e.number}`;
-      userSummaryMap[key] = (userSummaryMap[key] || 0) + (e.count || 1);
-    });
+    /* ---------------- SUMMARY UPDATE ---------------- */
 
-    const userOps = await Promise.all(
-      Object.entries(userSummaryMap).map(async ([key, count]) => {
-        const [rawType, number] = key.split('-');
-        const block = await BlockNumber.findOne({
-          field: rawType,
-          number,
-          drawTime: extractBetTypeTime(validEntries.find(ev => extractBaseType(ev.type) === rawType && ev.number === number)?.type || ""),
-          createdBy: loggedInUser,
-          isActive: true
-        });
-
-        const max = (block && block.isActive) ? block.count : parseInt(allLimits[rawType] || '9999', 10);
-        const usedToday = actualUsageMap[key] || 0;
-        const newRemaining = Math.max(0, max - (usedToday + count));
-
-        return {
-          updateOne: {
-            filter: { date: targetDateStr, user: loggedInUser, type: rawType, number },
-            update: { $set: { remaining: newRemaining } },
-            upsert: true,
-          },
-        };
-      })
-    );
-
-    if (userOps.length > 0) await DailyUserLimit.bulkWrite(userOps);
-    // 1️⃣1️⃣ Update SalesReportSummary Automatically
     try {
-      const summaryUser = selectedAgent || createdBy || loggedInUser;
-      // Pass validEntries to the helper for aggregation (using transaction date todayStr)
-      await updateAutomaticSummary(summaryUser, todayStr, timeLabel, timeCode, validEntries);
 
-      // 1️⃣2️⃣ Clear local entries cache to ensure reports show fresh data
+      const summaryUser = selectedAgent || createdBy || loggedInUser;
+
+      await updateAutomaticSummary(
+        summaryUser,
+        todayStr,
+        timeLabel,
+        timeCode,
+        validEntries
+      );
+
       entriesCache.clear();
       reportCache.clear();
-    } catch (summaryErr) {
-      console.error("❌ Error updating SalesReportSummary:", summaryErr);
+
+    } catch (err) {
+      console.error("Summary update error:", err);
     }
 
-
-    return res.json({ billNo: savedBill.billNo, exceeded: allExceeded });
+    return res.json({
+      billNo: savedBill.billNo,
+      exceeded: allExceeded
+    });
 
   } catch (err) {
-    console.error('Error saving entries:', err);
-    return res.status(500).json({ message: 'Internal server error' });
+
+    console.error("Error saving entries:", err);
+
+    return res.status(500).json({
+      message: "Internal server error"
+    });
   }
-}
+};
 // const saveValidEntries = async (req, res) => {
 //   try {
 //     const {
@@ -4178,7 +4469,8 @@ const getSalesReport = async (req, res) => {
     };
 
     if (timeLabel && timeLabel !== "all") {
-      filter.drawTime = summaryLabelMap[timeLabel.trim()] || timeLabel.trim().toUpperCase();
+      const searchLabels = getSearchLabels(timeLabel);
+      filter.drawTime = { $in: searchLabels };
     }
 
     const targetUser = normCreatedBy || normLoggedInUser || "";
@@ -4244,7 +4536,9 @@ const getSalesReport = async (req, res) => {
               if (selfPartCount > 0) {
                 const rowUnitRate = Number((selfPartAmount / selfPartCount).toFixed(2));
                 finalEntries.push({
-                  _id: s._id, createdBy: agent, date: s.date, drawTime: s.drawTime,
+                  _id: s._id, createdBy: agent, date: s.date,
+                  drawTime: s.drawTime, timeLabel: s.drawTime,
+                  createdAt: s.createdAt,
                   type: r.scheme, count: selfPartCount,
                   rate: selfPartAmount, // Frontend expects TOTAL amount here
                   amount: selfPartAmount,
@@ -4288,17 +4582,13 @@ const getSalesReport = async (req, res) => {
 
     const entryQuery = {
       createdBy: { $in: agentList },
-      createdAt: { $gte: start, $lte: end },
+      date: { $gte: start, $lte: end },
       isValid: { $ne: false }
     };
 
     if (timeLabel && timeLabel !== "all") {
-      const normalized = summaryLabelMap[timeLabel.trim()] || timeLabel.trim().toUpperCase();
-      if (normalized === "KERALA 3 PM") {
-        entryQuery.timeLabel = { $in: ["KERALA 3 PM", "LSK 3 PM"] };
-      } else {
-        entryQuery.timeLabel = timeLabel;
-      }
+      const searchLabels = getSearchLabels(timeLabel);
+      entryQuery.timeLabel = { $in: searchLabels };
     }
 
     console.log(`🔍 [getSalesReport] Fetching Entry data...`);
@@ -4373,6 +4663,10 @@ const getSalesReport = async (req, res) => {
           createdBy: sellerAgent,
           date: formatDateIST(e.createdAt),
           drawTime: e.timeLabel,
+          timeLabel: e.timeLabel, // Frontend expects timeLabel
+          createdAt: e.createdAt, // Frontend expects createdAt (ISO)
+          number: e.number || e.num || e.betNumber || "",
+          num: e.number || e.num || e.betNumber || "",
           type: betType,
           count: entryCount,
           rate: entryAmount, // Frontend expects TOTAL amount here
@@ -5906,6 +6200,356 @@ const updateSalesReportSummary = async (req, res) => {
   }
 };
 
+const saveWinningReport = async (req, res) => {
+  try {
+    const { date, timeLabel, agent } = req.body;
+
+    if (!date || !timeLabel || !agent) {
+      return res.status(400).json({
+        message: "date, timeLabel and agent are required"
+      });
+    }
+
+    const searchLabels = getSearchLabels(timeLabel);
+    const normalizedLabel = summaryLabelMap[timeLabel.toUpperCase()] || timeLabel;
+
+    /* =========================
+       1️⃣ FETCH USERS (HIERARCHY)
+    ========================= */
+
+    const users = await MainUser.find()
+      .select("username createdBy scheme")
+      .lean();
+
+    const userMap = {};
+    users.forEach(u => (userMap[u.username] = u));
+
+    function getAllDescendants(username, visited = new Set()) {
+      if (visited.has(username)) return [];
+      visited.add(username);
+
+      const children = users
+        .filter(u => u.createdBy === username)
+        .map(u => u.username);
+
+      let all = [...children];
+      children.forEach(c => {
+        all = all.concat(getAllDescendants(c, visited));
+      });
+      return all;
+    }
+
+    const agentUsers = [agent, ...getAllDescendants(agent)];
+
+    function getPath(username) {
+      const path = [];
+      let curr = userMap[username];
+      while (curr && curr.createdBy) {
+        path.unshift(curr.createdBy);
+        curr = userMap[curr.createdBy];
+      }
+      return path;
+    }
+
+    const createdByPath = getPath(agent);
+    const scheme = userMap[agent]?.scheme || "N/A";
+
+    // 🟢 Fetch Result
+    const resultDoc = await Result.findOne({ date, time: { $in: searchLabels } }).lean();
+    if (!resultDoc) {
+      return res.json({ message: `No result found for ${date} in ${searchLabels}`, saved: false });
+    }
+
+    const normalizedResult = {
+      "1": resultDoc.prizes?.[0] || null,
+      "2": resultDoc.prizes?.[1] || null,
+      "3": resultDoc.prizes?.[2] || null,
+      "4": resultDoc.prizes?.[3] || null,
+      "5": resultDoc.prizes?.[4] || null,
+      others: (resultDoc.entries || []).map(e => e.result).filter(Boolean)
+    };
+
+    // 🟢 Fetch Scheme (Schema)
+    const agentSchemeOrig = userMap[agent]?.scheme || "N/A";
+    let activeTab = 1;
+    if (agentSchemeOrig.toUpperCase() !== "N/A") {
+      activeTab = parseInt(agentSchemeOrig.replace(/[^0-9]/g, ""), 10) || 1;
+    }
+
+    const schemaDoc = await Schema.findOne(
+      { activeTab, "draws.drawName": { $in: searchLabels } },
+      { draws: { $elemMatch: { drawName: { $in: searchLabels } } } }
+    ).lean();
+    const drawSchemeData = schemaDoc?.draws?.[0];
+
+    /* =========================
+       2️⃣ FETCH ENTRIES (Direct Only)
+    ========================= */
+
+    const start = parseDateISTStart(date);
+    const end = parseDateISTEnd(date);
+
+    const winningEntries = await Entry.find({
+      createdBy: agent, // 🔑 Direct only to avoid duplication
+      isValid: true,
+      timeLabel: { $in: searchLabels },
+      date: { $gte: start, $lte: end }
+    }).lean();
+
+    if (!winningEntries.length) {
+      return res.json({
+        message: "No entries found",
+        saved: false
+      });
+    }
+
+    /* =========================
+       3️⃣ CALCULATE SUMMARY
+    ========================= */
+
+    const billSet = new Set();
+    const winCounts = {};
+    let totalPrize = 0;
+    let totalSuper = 0;
+    let totalWinningEntries = 0;
+
+    for (const e of winningEntries) {
+      const wins = calculateWinAmountFull(e, normalizedResult, drawSchemeData);
+      if (wins && wins.length > 0) {
+        billSet.add(e.billNo);
+        totalWinningEntries++;
+
+        for (const win of wins) {
+          totalPrize += win.prize;
+          totalSuper += win.superPrize;
+
+          const winType = win.winType;
+          if (winType) {
+            winCounts[winType] = (winCounts[winType] || 0) + (e.count || 0);
+          }
+        }
+      }
+    }
+
+    /* =========================
+       4️⃣ SAVE / UPDATE SUMMARY
+    ========================= */
+
+    const summary = await WinningSummary.findOneAndUpdate(
+      { date, timeLabel: { $in: searchLabels }, agent },
+      {
+        date,
+        timeLabel: normalizedLabel,
+        agent,
+        createdByPath,
+        scheme: agentSchemeOrig,
+
+        totalBills: billSet.size,
+        totalWinningEntries: 0,
+        totalBillAmount: 0,
+        totalWinningAmount: totalPrize,
+        superTotalAmount: totalPrize + totalSuper,
+        winCounts: winCounts
+      },
+      { upsert: true, new: true }
+    );
+
+    return res.json({
+      message: "Winning report summary saved successfully",
+      summary
+    });
+
+  } catch (err) {
+    console.error("❌ saveWinningReport ERROR:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Helper for dynamic super calculation in summary
+const getSuperPrizeForWinType = (winType, drawSchemeData, fallbackSuper = 0) => {
+  if (!drawSchemeData || !winType) return fallbackSuper;
+
+  let targetGroup = "";
+  let baseType = "";
+
+  if (winType.startsWith("SUPER")) {
+    targetGroup = "Group 3-SUPER";
+    baseType = "SUPER";
+  } else if (winType.startsWith("BOX")) {
+    targetGroup = "Group 3-BOX";
+    baseType = "BOX";
+  } else if (["AB", "BC", "AC"].includes(winType)) {
+    targetGroup = "Group 2";
+    baseType = winType;
+  } else if (["A", "B", "C"].includes(winType)) {
+    targetGroup = "Group 1";
+    baseType = winType;
+  }
+
+  const group = (drawSchemeData.schemes || []).find(g => g.group === targetGroup);
+  if (!group) return fallbackSuper;
+
+  let row;
+  if (baseType === "SUPER" || baseType === "BOX") {
+    const match = winType.match(/(\d+)/);
+    const pos = match ? parseInt(match[1], 10) : (winType.includes("other") || winType.includes("permutation") ? 6 : 1);
+    row = group.rows.find(r => r.pos === pos);
+    if (!row && baseType === "BOX" && pos <= 1) row = group.rows[0];
+  } else {
+    row = group.rows.find(r => r.scheme === baseType);
+  }
+
+  // 🔑 THE FIX: If row or super is missing in THIS scheme, use the fallback from the agent's record
+  const val = row ? row.super : null;
+  return (val !== null && val !== undefined) ? val : fallbackSuper;
+};
+
+const getWinningReportSummary = async (req, res) => {
+  try {
+    const { fromDate, toDate, time = "ALL", agent, loggedInUser } = req.body;
+
+    if (!fromDate || !toDate) {
+      return res.status(400).json({ message: "fromDate and toDate are required" });
+    }
+
+    // 1. Determine the target agent for the current view
+    // If agent is explicitly provided, we look at that agent's branch.
+    // Otherwise, we look at the loggedInUser's branch.
+    const targetAgent = agent && agent !== "ALL" ? agent : loggedInUser;
+
+    if (!targetAgent) {
+      return res.status(400).json({ message: `target agent is required (agent: ${agent}, loggedInUser: ${loggedInUser})` });
+    }
+
+    // 2. Fetch all related summaries in the date/time range
+    // We want summaries where the agent is the targetAgent OR targetAgent is in their path
+    const query = {
+      date: { $gte: fromDate, $lte: toDate },
+      $or: [
+        { agent: targetAgent },
+        { createdByPath: targetAgent }
+      ]
+    };
+
+    if (time !== "ALL") {
+      const searchLabels = getSearchLabels(time);
+      query.timeLabel = { $in: searchLabels };
+    }
+
+    const allSummaries = await WinningSummary.find(query).lean();
+
+    // 3. Fetch user hierarchy and viewer scheme info
+    const allUsers = await MainUser.find().select("username createdBy usertype scheme").lean();
+    const targetLower = targetAgent.toLowerCase();
+    const children = allUsers.filter(u => (u.createdBy || '').toLowerCase() === targetLower);
+    const childUsernames = children.map(u => u.username);
+    const childUsernamesLower = childUsernames.map(u => u.toLowerCase());
+
+    // 2.5 Fetch viewer's scheme to scale SUPER prizes
+    const viewerName = loggedInUser || targetAgent;
+    const viewer = allUsers.find(u => u.username === viewerName);
+    const viewerSchemeOrig = viewer?.scheme || "N/A";
+    let viewerActiveTab = 1;
+    if (viewerSchemeOrig.toUpperCase() !== "N/A") {
+      viewerActiveTab = parseInt(viewerSchemeOrig.replace(/[^0-9]/g, ""), 10) || 1;
+    }
+
+    const uniqueLabels = [...new Set(allSummaries.map(s => s.timeLabel))];
+    const viewerSchemeCache = {};
+    for (const label of uniqueLabels) {
+      const normalizedLabel = summaryLabelMap[label.toUpperCase()] || label;
+      const searchLabels = getSearchLabels(normalizedLabel);
+      const schemaDoc = await Schema.findOne(
+        { activeTab: viewerActiveTab, "draws.drawName": { $in: searchLabels } },
+        { draws: { $elemMatch: { drawName: { $in: searchLabels } } } }
+      ).lean();
+      if (schemaDoc) viewerSchemeCache[label] = schemaDoc.draws[0];
+    }
+
+    // 4. Aggregate Totals
+    let totalBills = 0;
+    let totalBillAmount = 0;
+    let totalWinningAmount = 0;
+    let superTotalAmount = 0;
+
+    const byAgentMap = {};
+
+    // Initialize map for self and direct children
+    byAgentMap[targetAgent] = { agent: targetAgent, totalBills: 0, totalBillAmount: 0, totalWinningAmount: 0, superTotalAmount: 0, isSelf: true };
+    children.forEach(c => {
+      byAgentMap[c.username] = { agent: c.username, totalBills: 0, totalBillAmount: 0, totalWinningAmount: 0, superTotalAmount: 0, usertype: c.usertype };
+    });
+
+    for (const s of allSummaries) {
+      // Logic: Dynamically calculate Super based on Viewer's scheme
+      const drawScheme = viewerSchemeCache[s.timeLabel];
+      let calculatedSuperSum = 0;
+      const winCounts = s.winCounts || {};
+
+      for (const winType in winCounts) {
+        const count = winCounts[winType] || 0;
+        // Pass the summary's own prize as fallback in case viewer's scheme is broken
+        const fallbackSuper = s.winPrizes ? (s.winPrizes[winType] || 0) : 0;
+        const superPrize = getSuperPrizeForWinType(winType, drawScheme, fallbackSuper);
+        calculatedSuperSum += (superPrize * count);
+      }
+
+      const effectiveSuperTotal = (s.totalWinningAmount || 0) + calculatedSuperSum;
+
+      // 1. Global totals (Sum of ALL direct summaries in the target's branch)
+      totalBills += s.totalBills || 0;
+      totalBillAmount += s.totalBillAmount || 0;
+      totalWinningAmount += s.totalWinningAmount || 0;
+      superTotalAmount += effectiveSuperTotal;
+
+      // 2. Breakdown Logic
+      if (s.agent === targetAgent) {
+        // Direct winnings contribution for the target agent
+        byAgentMap[targetAgent].totalBills += s.totalBills || 0;
+        byAgentMap[targetAgent].totalBillAmount += s.totalBillAmount || 0;
+        byAgentMap[targetAgent].totalWinningAmount += s.totalWinningAmount || 0;
+        byAgentMap[targetAgent].superTotalAmount += effectiveSuperTotal;
+      } else {
+        // Find which direct child's branch this summary belongs to
+        const path = s.createdByPath || [];
+        const targetIndex = path.findIndex(p => p.toLowerCase() === targetLower);
+
+        // The child is either the summary's agent itself (if direct child)
+        // or an intermediate child in the path.
+        let childKey = null;
+        if (targetIndex !== -1 && path[targetIndex + 1]) {
+          childKey = path[targetIndex + 1];
+        } else if (childUsernamesLower.includes(s.agent.toLowerCase())) {
+          childKey = s.agent;
+        }
+
+        if (childKey && byAgentMap[childKey]) {
+          byAgentMap[childKey].totalBills += s.totalBills || 0;
+          byAgentMap[childKey].totalBillAmount += s.totalBillAmount || 0;
+          byAgentMap[childKey].totalWinningAmount += s.totalWinningAmount || 0;
+          byAgentMap[childKey].superTotalAmount += effectiveSuperTotal;
+        }
+      }
+    }
+
+    return res.json({
+      fromDate,
+      toDate,
+      time,
+      agent: targetAgent,
+      totalBills,
+      totalBillAmount,
+      totalWinningAmount,
+      superTotalAmount,
+      byAgent: Object.values(byAgentMap).filter(a => a.totalWinningAmount > 0 || a.totalBills > 0)
+    });
+
+  } catch (err) {
+    console.error("❌ getWinningReportSummary ERROR:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
 
 
 
@@ -5978,5 +6622,9 @@ module.exports = {
   createSalesReportSummary,
   getSalesReportSummary,
   updateSalesReportSummary,
-  syncSummaries
+  syncSummaries,
+  saveWinningReport,
+  getWinningReportSummary,
+  isUserOrAncestorSalesBlocked,
+  getAncestors
 };

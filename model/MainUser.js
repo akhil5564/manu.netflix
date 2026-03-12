@@ -32,6 +32,8 @@ const mainUserSchema = new mongoose.Schema({
     default: 'sub',
   },
   createdAt: { type: Date, default: Date.now },
+  blocked: { type: Boolean, default: false },
+  salesBlocked: { type: Boolean, default: false },
 });
 
 /* 🔥 PERFORMANCE INDEXES */

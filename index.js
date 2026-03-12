@@ -105,6 +105,11 @@ app.get("/debug/rateMasters", async (req, res) => {
   res.json(rates);
 });
 
+// 🔹 SAVE / UPDATE winning summary (called internally after result save)
+app.post("/winning/summary/save", Controller.saveWinningReport);
+
+// 🔹 GET winning summary (frontend uses this)
+app.post("/winning/summary", Controller.getWinningReportSummary);
 
 
 
