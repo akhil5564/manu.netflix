@@ -201,6 +201,42 @@ const getGeneralActualUsageMap = async (dateStr, keys) => {
   }
 };
 
+/**
+ * Bulk fetch hierarchical usage map for an ancestor and all their descendants for specific keys (TYPE-NUMBER)
+ */
+const getHierarchicalActualUsageMap = async (dateStr, ancestor, allUsers, keys) => {
+  try {
+    const start = parseDateISTStart(dateStr);
+    const end = parseDateISTEnd(dateStr);
+
+    const normAncestor = normalizeName(ancestor);
+    const descendants = getDescendants(normAncestor, allUsers); // Assuming getDescendants is defined elsewhere
+    const agentList = [normAncestor, ...descendants];
+
+    const entries = await Entry.find({
+      createdBy: { $in: agentList },
+      date: { $gte: start, $lte: end },
+      isValid: true
+    }).lean();
+
+    const map = {};
+    keys.forEach(k => map[k] = 0);
+
+    entries.forEach(e => {
+      const type = extractBaseType(e.type);
+      const key = `${type}-${e.number}`;
+      if (map[key] !== undefined) {
+        map[key] += (Number(e.count) || 0);
+      }
+    });
+    return map;
+  } catch (err) {
+    console.error('❌ [getHierarchicalActualUsageMap] Error:', err);
+    return {};
+  }
+};
+
+
 
 
 
@@ -688,24 +724,20 @@ const getNextBillNumber = async () => {
   return result.counter.toString().padStart(5, '0'); // ➜ '00001', '00002', ...
 };
 
-/**
- * Helper to get all ancestors of a user (including the user themselves).
- * Returns an array of usernames.
- */
 const getAncestors = async (username, visited = new Set()) => {
-  if (!username || visited.has(username.toLowerCase())) return [];
-  visited.add(username.toLowerCase());
+  if (!username) return [];
+  const norm = username.toLowerCase();
+  if (visited.has(norm)) return [];
+  visited.add(norm);
 
-  // Case-insensitive user lookup
   const user = await MainUser.findOne({
     username: { $regex: new RegExp(`^${username}$`, 'i') }
-  });
+  }).select("username createdBy").lean();
 
   if (!user) return [username];
 
   let ancestors = [user.username];
   if (user.createdBy && user.createdBy.toLowerCase() !== 'admin') {
-    // Recursively find parent with case-insensitive search
     const parentAncestors = await getAncestors(user.createdBy, visited);
     ancestors = ancestors.concat(parentAncestors);
   }
@@ -732,36 +764,20 @@ const getAllDescendantsFlat = async (username) => {
   return descendants;
 };
 
-/**
- * Helper to check if a user or any of their ancestors are blocked.
- * Uses recursive createdBy traversal.
- */
 const isUserOrAncestorBlocked = async (username) => {
   const ancestors = await getAncestors(username);
-
-  for (const ancestorName of ancestors) {
-    const user = await MainUser.findOne({ username: ancestorName });
-    if (user && user.blocked) return true;
-  }
-
-  return false;
+  const users = await MainUser.find({
+    username: { $in: ancestors.map(a => new RegExp(`^${a}$`, 'i')) }
+  }).select("blocked").lean();
+  return users.some(u => u.blocked);
 };
 
-/**
- * Helper to check if a user or any of their ancestors have sales blocked.
- * Uses recursive createdBy traversal.
- */
 const isUserOrAncestorSalesBlocked = async (username) => {
   const ancestors = await getAncestors(username);
-
-  for (const ancestorName of ancestors) {
-    const user = await MainUser.findOne({
-      username: { $regex: new RegExp(`^${ancestorName}$`, 'i') }
-    });
-    if (user && user.salesBlocked) return true;
-  }
-
-  return false;
+  const users = await MainUser.find({
+    username: { $in: ancestors.map(a => new RegExp(`^${a}$`, 'i')) }
+  }).select("salesBlocked").lean();
+  return users.some(u => u.salesBlocked);
 };
 
 const loginUser = async (req, res) => {
@@ -3327,105 +3343,70 @@ const addEntriesF = async ({ entries, timeLabel, timeCode, selectedAgent, create
 
 const saveValidEntries = async (req, res) => {
   try {
-
-    const {
-      entries,
-      timeLabel,
-      timeCode,
-      selectedAgent,
-      createdBy,
-      toggleCount,
-      loggedInUserType,
-      loggedInUser
-    } = req.body;
-
+    const { entries, timeLabel, timeCode, selectedAgent, createdBy, toggleCount, loggedInUserType, loggedInUser } = req.body;
+    // console.log('req.body;============', req.body)
     if (!entries || entries.length === 0) {
-      return res.status(400).json({ message: "No entries provided" });
+      return res.status(400).json({ message: 'No entries provided' });
     }
 
+    // 🛡️ Hierarchical Sales Block Check (Prevents and blocks descendants from placing bets if ancestor is sales-blocked)
+    const activeSellerForBlock = normalizeName(selectedAgent) || normalizeName(createdBy);
+    if (await isUserOrAncestorSalesBlocked(activeSellerForBlock)) {
+      return res.status(403).json({ message: 'Sales are blocked for this user or their master.' });
+    }
     const now = new Date();
     const todayStr = formatDateIST(now);
     const normalizedLabel = normalizeDrawLabelLimit(timeLabel);
-
-    /* ---------------- BLOCK TIME ---------------- */
-
+    // console.log('normalizedLabel==============', normalizedLabel);
+    // 1️⃣ Get block/unblock time
     const blockTimeData = await getBlockTimeF(timeLabel, loggedInUserType);
-
     if (!blockTimeData) {
-      return res.status(400).json({
-        message: `No block time configuration found for draw: ${timeLabel}`
-      });
+      return res.status(400).json({ message: `No block time configuration found for draw: ${timeLabel}` });
     }
-
     const { blockTime, unblockTime } = blockTimeData;
+    if (!blockTime || !unblockTime) return res.status(400).json({ message: 'Block or unblock time missing' });
 
-    const [bh, bm] = blockTime.split(":").map(Number);
-    const [uh, um] = unblockTime.split(":").map(Number);
+    const [bh, bm] = blockTime.split(':').map(Number);
+    const [uh, um] = unblockTime.split(':').map(Number);
 
     const block = new Date(now.getFullYear(), now.getMonth(), now.getDate(), bh, bm);
     const unblock = new Date(now.getFullYear(), now.getMonth(), now.getDate(), uh, um);
 
     if (now >= block && now < unblock) {
-      return res.status(403).json({
-        message: "Entry time is blocked for this draw"
-      });
+      return res.status(403).json({ message: 'Entry time is blocked for this draw' });
     }
 
+    // Decide target date: after unblock -> next day, else today
     const targetDateObj = new Date(now);
-
     if (now >= unblock) {
       targetDateObj.setDate(targetDateObj.getDate() + 1);
     }
-
     const targetDateStr = formatDateIST(targetDateObj);
 
-    /* ---------------- BLOCK DATE ---------------- */
-
-    const blockedDates = await BlockDate.findOne({
-      date: targetDateStr,
-      ticket: normalizedLabel
-    });
-
+    // 2️⃣ Check Blocked Date for the target date
+    const blockedDates = await BlockDate.findOne({ date: targetDateStr, ticket: normalizedLabel });
     if (blockedDates) {
-      return res.status(400).json({
-        message: `Entries are blocked for ${targetDateStr} for this ticket.`
-      });
+      return res.status(400).json({ message: `Entries are blocked for ${targetDateStr} for this ticket.` });
     }
 
-    /* ---------------- TICKET LIMIT ---------------- */
-
+    // 3️⃣ Fetch ticket limits
     const limits = await getTicketLimits();
-
     if (!limits) {
-      return res.status(400).json({
-        message: "No ticket limits configuration found. Please set up ticket limits first."
-      });
+      return res.status(400).json({ message: 'No ticket limits configuration found. Please set up ticket limits first.' });
     }
-
     const allLimits = { ...limits.group1, ...limits.group2, ...limits.group3 };
 
-    /* ---------------- EXPAND ENTRIES ---------------- */
-
+    // 3️⃣ Expansion Logic (Range & Set)
     const expandedEntries = [];
-
     for (const entry of entries) {
-
       if (entry.rangeStart !== undefined && entry.rangeEnd !== undefined) {
-
+        // Expand range
         const start = parseInt(entry.rangeStart, 10);
         const end = parseInt(entry.rangeEnd, 10);
-
-        const width =
-          entry.toggleCount === 1
-            ? 1
-            : entry.toggleCount === 2
-            ? 2
-            : 3;
+        const width = entry.toggleCount === 1 ? 1 : entry.toggleCount === 2 ? 2 : 3;
 
         for (let i = start; i <= end; i++) {
-
-          const numStr = String(i).padStart(width, "0");
-
+          const numStr = String(i).padStart(width, '0');
           if (entry.isSet) {
             const perms = getPermutationsF(numStr);
             perms.forEach(p => expandedEntries.push({ ...entry, number: p }));
@@ -3433,249 +3414,290 @@ const saveValidEntries = async (req, res) => {
             expandedEntries.push({ ...entry, number: numStr });
           }
         }
-
       } else if (entry.isSet && entry.number) {
-
+        // Expand permutations for a single number
         const perms = getPermutationsF(entry.number);
         perms.forEach(p => expandedEntries.push({ ...entry, number: p }));
-
       } else {
         expandedEntries.push(entry);
       }
     }
 
-    /* ---------------- CACHE TYPES ---------------- */
-
-    expandedEntries.forEach(e => {
-      e.rawType = extractBaseType(e.type);
-      e.rawTime = extractBetTypeTime(e.type);
-    });
-
-    /* ---------------- PREPARE KEYS ---------------- */
-
+    // 4️⃣ Sum counts per type-number for new entries
     const newTotalByNumberType = {};
-
-    expandedEntries.forEach(entry => {
-      const key = `${entry.rawType}-${entry.number}`;
-      newTotalByNumberType[key] =
-        (newTotalByNumberType[key] || 0) + (entry.count || 1);
+    expandedEntries.forEach((entry) => {
+      const rawType = entry.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
+      const key = `${rawType}-${entry.number}`;
+      newTotalByNumberType[key] = (newTotalByNumberType[key] || 0) + (entry.count || 1);
     });
 
+    // 5️⃣ Fetch remaining from DailyLimitUsage
     const keys = Object.keys(newTotalByNumberType);
+    const remainingMap = await countByUsageF(targetDateStr, keys);
+    const generalActualUsageMap = await getGeneralActualUsageMap(targetDateStr, keys);
 
-    /* ---------------- PARALLEL QUERIES ---------------- */
-
-    const [remainingMap, generalActualUsageMap] = await Promise.all([
-      countByUsageF(targetDateStr, keys),
-      getGeneralActualUsageMap(targetDateStr, keys)
-    ]);
-
-    /* ---------------- PRELOAD BLOCK NUMBERS ---------------- */
-
-    const numbers = [...new Set(expandedEntries.map(e => e.number))];
-    const types = [...new Set(expandedEntries.map(e => e.rawType))];
-    const times = [...new Set(expandedEntries.map(e => e.rawTime))];
-
-    const blockedNumbers = await BlockNumber.find({
-      field: { $in: types },
-      number: { $in: numbers },
-      drawTime: { $in: times },
-      createdBy: loggedInUser,
-      isActive: true
-    }).lean();
-
-    const blockMap = {};
-
-    blockedNumbers.forEach(b => {
-      blockMap[`${b.field}-${b.number}-${b.drawTime}`] = b;
-    });
-
-    /* ---------------- VALIDATION ---------------- */
-
+    // 6️⃣ Validate entries
     let validEntries = [];
-    const exceededMap = {};
+    const exceededMap = {}; // key -> { key, attempted, exceeded, added, reason }
     const usedInGeneralBatchByNumber = {};
 
+    // PASS 1: General Daily Limits
     for (const entry of expandedEntries) {
-
       const count = entry.count || 1;
-      const key = `${entry.rawType}-${entry.number}`;
+      const rawType = entry.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
+      const number = entry.number;
+      const key = `${rawType}-${number}`;
 
       if (!exceededMap[key]) {
-        exceededMap[key] = {
-          key,
-          attempted: 0,
-          exceeded: 0,
-          added: 0,
-          reason: "",
-          limit: 0
-        };
+        exceededMap[key] = { key, attempted: 0, exceeded: 0, added: 0, reason: '', limit: 0 };
       }
-
       exceededMap[key].attempted += count;
 
-      const maxLimit = parseInt(allLimits[entry.rawType] || "9999", 10);
+      const maxLimit = parseInt(allLimits[rawType] || '9999', 10);
       exceededMap[key].limit = maxLimit;
-
       const remainingFromDb = remainingMap[key]?.remaining;
 
+      // 🛡️ EFFECTIVE REMAINING (GENERAL)
       const usedToday = generalActualUsageMap[key] || 0;
-
-      const effectiveRemaining = Math.max(
-        typeof remainingFromDb === "number" ? remainingFromDb : 0,
-        maxLimit - usedToday
-      );
-
-      const remainingForBatch = Math.max(
-        0,
-        effectiveRemaining - (usedInGeneralBatchByNumber[key] || 0)
-      );
+      const effectiveRemaining = Math.max(typeof remainingFromDb === 'number' ? remainingFromDb : 0, maxLimit - usedToday);
+      const remainingForBatch = Math.max(0, effectiveRemaining - (usedInGeneralBatchByNumber[key] || 0));
 
       if (remainingForBatch <= 0) {
         exceededMap[key].exceeded += count;
-        exceededMap[key].reason = "Daily limit reached";
+        exceededMap[key].reason = 'Daily limit reached';
         continue;
       }
 
       const willAdd = Math.min(count, remainingForBatch);
-
       if (willAdd < count) {
-
-        exceededMap[key].exceeded += count - willAdd;
+        exceededMap[key].exceeded += (count - willAdd);
         exceededMap[key].added += willAdd;
-        exceededMap[key].reason = "Daily limit partial";
-
+        exceededMap[key].reason = 'Daily limit partial';
         validEntries.push({ ...entry, count: willAdd });
-
-        usedInGeneralBatchByNumber[key] =
-          (usedInGeneralBatchByNumber[key] || 0) + willAdd;
-
+        usedInGeneralBatchByNumber[key] = (usedInGeneralBatchByNumber[key] || 0) + willAdd;
       } else {
-
         exceededMap[key].added += count;
-
         validEntries.push(entry);
-
-        usedInGeneralBatchByNumber[key] =
-          (usedInGeneralBatchByNumber[key] || 0) + count;
+        usedInGeneralBatchByNumber[key] = (usedInGeneralBatchByNumber[key] || 0) + count;
       }
     }
 
-    /* ---------------- USER BLOCK VALIDATION ---------------- */
+
+    // PASS 2: Strict Hierarchical Blocked Numbers (Bulk Optimized)
+    const firstType = expandedEntries[0]?.type || "";
+    const currentDrawTime = extractBetTypeTime(firstType);
+    
+    // We already fetched ancestors for Credit Limit, let's fetch them here to check blocked numbers hierarchically
+    const allUsers = await MainUser.find().select("username createdBy").lean();
+    const activeSeller = normalizeName(selectedAgent) || normalizeName(createdBy);
+    
+    // Get chain of command (from current seller up to admin)
+    let sellerAncestors = [];
+    try {
+        sellerAncestors = await getAncestors(activeSeller);
+        if (!sellerAncestors.includes(activeSeller)) {
+            sellerAncestors.unshift(activeSeller); // Ensure the active seller is checked too
+        }
+    } catch (e) {
+        sellerAncestors = [activeSeller];
+    }
+
+    // Fetch all BlockNumbers for anyone in the chain of command for this draw
+    const chainBlocks = await BlockNumber.find({
+      createdBy: { $in: sellerAncestors.map(a => new RegExp(`^${a}$`, "i")) },
+      drawTime: currentDrawTime,
+      isActive: true,
+    }).lean();
+
+    // Prepare a map of { ancestorName: { "TYPE-NUMBER": BlockNumberDoc } }
+    const hierarchicalBlockMap = {};
+    chainBlocks.forEach(b => {
+        const creatorNorm = normalizeName(b.createdBy);
+        if (!hierarchicalBlockMap[creatorNorm]) hierarchicalBlockMap[creatorNorm] = {};
+        hierarchicalBlockMap[creatorNorm][`${b.field}-${b.number}`] = b;
+    });
+
+    const keysForBatch = [...new Set(validEntries.map(e => `${extractBaseType(e.type)}-${e.number}`))];
+
+    // Pre-calculate cumulative usage maps for each ancestor that actually has block records
+    const hierarchicalUsageMaps = {};
+    for (const ancestor of sellerAncestors) {
+       const ancestorNorm = normalizeName(ancestor);
+       if (hierarchicalBlockMap[ancestorNorm] && Object.keys(hierarchicalBlockMap[ancestorNorm]).length > 0) {
+           hierarchicalUsageMaps[ancestorNorm] = await getHierarchicalActualUsageMap(targetDateStr, ancestorNorm, allUsers, keysForBatch);
+       }
+    }
 
     let nextValidEntries = [];
-
     for (const entry of validEntries) {
+      const rawTypes = extractBaseType(entry.type);
+      const number = entry.number;
+      const key = `${rawTypes}-${number}`;
+      
+      let entryAllowedCount = entry.count;
+      let blockedByAncestor = null;
+      let bottleneckLimit = null;
 
-      const key = `${entry.rawType}-${entry.number}`;
-      const blockKey = `${entry.rawType}-${entry.number}-${entry.rawTime}`;
+      // Check against every ancestor to find the tightest bottleneck for this number
+      for (const ancestor of sellerAncestors) {
+          const ancestorNorm = normalizeName(ancestor);
+          const blockedDoc = hierarchicalBlockMap[ancestorNorm]?.[key];
+          
+          if (blockedDoc && blockedDoc.isActive) {
+              const maxLimit = blockedDoc.count;
+              const alreadyUsedByDownline = hierarchicalUsageMaps[ancestorNorm]?.[key] || 0;
+              const remainingForAncestor = Math.max(0, maxLimit - alreadyUsedByDownline);
+              
+              if (remainingForAncestor < entryAllowedCount) {
+                  entryAllowedCount = remainingForAncestor;
+                  blockedByAncestor = ancestorNorm;
+                  bottleneckLimit = maxLimit;
+              }
+          }
+      }
 
-      const blocked = blockMap[blockKey];
-
-      if (blocked && blocked.count < entry.count) {
-
-        const allowed = Math.max(0, blocked.count);
-        const removed = entry.count - allowed;
+      if (entryAllowedCount < entry.count) {
+        const removed = entry.count - entryAllowedCount;
 
         exceededMap[key].exceeded += removed;
         exceededMap[key].added -= removed;
-        exceededMap[key].reason = "User blocked number";
-        exceededMap[key].limit = blocked.count;
+        exceededMap[key].reason = `Hierarchical block by ${blockedByAncestor}`;
+        exceededMap[key].limit = bottleneckLimit;
 
-        if (allowed > 0) {
-          nextValidEntries.push({ ...entry, count: allowed });
+        if (entryAllowedCount > 0) {
+          nextValidEntries.push({ ...entry, count: entryAllowedCount });
+          // If we partially accept it, update the hierarchical tracking instantly for subsequent entries in the same batch
+          for (const ancestor of sellerAncestors) {
+             const ancestorNorm = normalizeName(ancestor);
+             if (hierarchicalUsageMaps[ancestorNorm] !== undefined) {
+                 hierarchicalUsageMaps[ancestorNorm][key] = (hierarchicalUsageMaps[ancestorNorm][key] || 0) + entryAllowedCount;
+             }
+          }
         }
-
       } else {
         nextValidEntries.push(entry);
+        // Fully accepted, adjust the tracking instantly
+        for (const ancestor of sellerAncestors) {
+             const ancestorNorm = normalizeName(ancestor);
+             if (hierarchicalUsageMaps[ancestorNorm] !== undefined) {
+                 hierarchicalUsageMaps[ancestorNorm][key] = (hierarchicalUsageMaps[ancestorNorm][key] || 0) + entry.count;
+             }
+        }
       }
     }
-
     validEntries = nextValidEntries;
 
-    /* ---------------- USER DAILY LIMIT ---------------- */
+    // PASS 3: User Daily Usage Limits
+    const keysForUserUsage = [...new Set(validEntries.map(e => `${extractBaseType(e.type)}-${e.number}`))];
+    const userRemainingMap = await countByUserUsageF(targetDateStr, loggedInUser, keysForUserUsage);
 
-    const keysForUserUsage = [
-      ...new Set(validEntries.map(e => `${e.rawType}-${e.number}`))
-    ];
-
-    const [userRemainingMap, actualUsageMap] = await Promise.all([
-      countByUserUsageF(targetDateStr, loggedInUser, keysForUserUsage),
-      getActualUsageMap(targetDateStr, loggedInUser, keysForUserUsage)
-    ]);
+    // 🔥 SELF-HEALING: Fetch actual usage to ensure we never have stale "remaining" values
+    const actualUsageMap = await getActualUsageMap(targetDateStr, loggedInUser, keysForUserUsage);
 
     nextValidEntries = [];
-    const usedInBatchByNumber = {};
+    const usedInBatchByNumber = {}; // track use within this batch to subtract correctly
 
     for (const entry of validEntries) {
+      const rawTypes = extractBaseType(entry.type);
+      const number = entry.number;
+      const key = `${rawTypes}-${number}`;
 
-      const key = `${entry.rawType}-${entry.number}`;
+      const rawType = key.split('-')[0];
+      const maxLimit = parseInt(allLimits[rawType] || '9999', 10); // userBlockMap logic was already handled in PASS 2, fallback to regular max limit here.
 
-      const block = blockMap[`${entry.rawType}-${entry.number}-${entry.rawTime}`];
+      const remainingFromDb = typeof userRemainingMap[key]?.remaining === 'number'
+        ? userRemainingMap[key].remaining
+        : maxLimit;
 
-      const maxLimit =
-        block && block.isActive
-          ? block.count
-          : parseInt(allLimits[entry.rawType] || "9999", 10);
-
-      const remainingFromDb =
-        typeof userRemainingMap[key]?.remaining === "number"
-          ? userRemainingMap[key].remaining
-          : maxLimit;
-
+      // 🛡️ EFFECTIVE REMAINING: Sync with actual database state
       const usedToday = actualUsageMap[key] || 0;
-
-      const effectiveRemaining = Math.max(
-        remainingFromDb,
-        maxLimit - usedToday
-      );
-
-      const remainingForBatch = Math.max(
-        0,
-        effectiveRemaining - (usedInBatchByNumber[key] || 0)
-      );
+      const effectiveRemaining = Math.max(remainingFromDb, maxLimit - usedToday);
+      const remainingForBatch = Math.max(0, effectiveRemaining - (usedInBatchByNumber[key] || 0));
 
       if (entry.count > remainingForBatch) {
-
         const allowed = Math.max(0, remainingForBatch);
         const removed = entry.count - allowed;
 
         exceededMap[key].exceeded += removed;
         exceededMap[key].added -= removed;
-        exceededMap[key].reason = "User daily limit";
+        exceededMap[key].reason = 'User daily limit';
         exceededMap[key].limit = maxLimit;
 
         if (allowed > 0) {
           nextValidEntries.push({ ...entry, count: allowed });
-          usedInBatchByNumber[key] =
-            (usedInBatchByNumber[key] || 0) + allowed;
+          usedInBatchByNumber[key] = (usedInBatchByNumber[key] || 0) + allowed;
         }
-
       } else {
-
         nextValidEntries.push(entry);
-
-        usedInBatchByNumber[key] =
-          (usedInBatchByNumber[key] || 0) + entry.count;
+        usedInBatchByNumber[key] = (usedInBatchByNumber[key] || 0) + entry.count;
       }
     }
-
     validEntries = nextValidEntries;
 
     const allExceeded = Object.values(exceededMap).filter(e => e.exceeded > 0);
 
     if (validEntries.length === 0) {
-      const message = allExceeded
-        .map(e => `${e.key}: Blocked ${e.exceeded} (${e.reason})`)
-        .join("\n");
-
-      return res.status(400).json({
-        message: "All entries failed validation:\n" + message,
-        exceeded: allExceeded
-      });
+      const message = allExceeded.map(e => `${e.key}: Blocked ${e.exceeded} (${e.reason})`).join('\n');
+      return res.status(400).json({ message: 'All entries failed validation:\n' + message, exceeded: allExceeded });
     }
 
-    /* ---------------- SAVE ENTRIES ---------------- */
+
+    /* =========================================
+       🛡️ CUMULATIVE CREDIT LIMIT ENFORCEMENT (Optimized via Summary)
+       ========================================== */
+    const lookupLabel = normalizeDrawLabel(timeLabel);
+    const ancestors = await getAncestors(createdBy);
+    console.log(`[DEBUG-SVE] Ancestors for ${createdBy}:`, ancestors);
+
+    const currentBatchTotal = validEntries.reduce((sum, e) => {
+      const rate = e.rate || (e?.total || (e.number.length === 1 ? 12 : 10) * e.count);
+      return sum + Number(rate);
+    }, 0);
+
+    // Bulk fetch UserAmount and SalesReportSummary for all ancestors
+    const limitDocs = await UserAmount.find({
+      toUser: { $in: ancestors.map(a => new RegExp(`^${a}$`, "i")) },
+      $or: [{ drawTime: lookupLabel }, { drawTime: "ALL" }]
+    }).lean();
+
+    const summaryDocs = await SalesReportSummary.find({
+      createdBy: { $in: ancestors },
+      date: targetDateStr,
+      drawTime: lookupLabel
+    }).lean();
+
+    for (const ancestorName of ancestors) {
+      // Find the most specific limit (specific drawTime > "ALL")
+      const relevantLimits = limitDocs.filter(d => d.toUser.toLowerCase() === ancestorName.toLowerCase());
+      const limitDoc = relevantLimits.find(d => d.drawTime === lookupLabel) || relevantLimits.find(d => d.drawTime === "ALL");
+
+      if (limitDoc) {
+        const limit = limitDoc.amount;
+        const summaryDoc = summaryDocs.find(s => s.createdBy.toLowerCase() === ancestorName.toLowerCase());
+        const totalAlreadySold = summaryDoc ? summaryDoc.totalAmount : 0;
+
+        console.log(`[DEBUG-SVE] ${ancestorName} cumulative (Summary): alreadySold=${totalAlreadySold}, currentBatch=${currentBatchTotal}, limit=${limit}`);
+
+        if (totalAlreadySold + currentBatchTotal > limit) {
+          const isSelf = ancestorName.toLowerCase() === createdBy.toLowerCase();
+          const errorMsg = isSelf
+            ? `Credit limit exceeded for ${timeLabel}.`
+            : `Cumulative credit limit for ${ancestorName} exceeded for ${timeLabel}.`;
+
+          console.log(`[DEBUG-SVE] LIMIT EXCEEDED for ${ancestorName}`);
+          return res.status(400).json({
+            message: errorMsg,
+            details: {
+              ancestor: ancestorName,
+              limit,
+              alreadySold: totalAlreadySold.toFixed(2),
+              currentAttempt: currentBatchTotal.toFixed(2),
+              shortfall: (totalAlreadySold + currentBatchTotal - limit).toFixed(2)
+            }
+          });
+        }
+      }
+    }
 
     const savedBill = await addEntriesF({
       entries: validEntries,
@@ -3686,23 +3708,50 @@ const saveValidEntries = async (req, res) => {
       toggleCount,
       date: targetDateStr
     });
+    // console.log('savedBill', savedBill)
 
-    /* ---------------- UPDATE LIMIT USAGE ---------------- */
-
+    // 8️⃣ Upsert DailyLimitUsage remaining per (date,type,number)
+    // We must decrement remaining by saved counts, initializing with TicketLimit on first write
+    // const usageByType = {};
+    // validEntries.forEach((e) => {
+    //   const rawType = e.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
+    //   usageByType[rawType] = (usageByType[rawType] || 0) + (e.count || 1);
+    // });
     const usageByTypeNumber = {};
-
-    validEntries.forEach(e => {
-      const key = `${e.rawType}-${e.number}`;
-      usageByTypeNumber[key] =
-        (usageByTypeNumber[key] || 0) + (e.count || 1);
+    validEntries.forEach((e) => {
+      const rawType = e.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
+      const number = e.number;
+      const key = `${rawType}-${number}`;
+      usageByTypeNumber[key] = (usageByTypeNumber[key] || 0) + (e.count || 1);
     });
 
+    // const ops = Object.entries(usageByType).map(([t, used]) => {
+    //   const max = parseInt(allLimits[t] || '9999', 10);
+    //   return {
+    //     updateOne: {
+    //       filter: { date: targetDateStr, type: t },
+    //       update: [
+    //         {
+    //           $set: {
+    //             remaining: {
+    //               $let: {
+    //                 vars: { curr: "$remaining" },
+    //                 in: {
+    //                   $max: [0, { $subtract: [{ $ifNull: ["$$curr", max] }, used] }]
+    //                 }
+    //               }
+    //             }
+    //           }
+    //         }
+    //       ],
+    //       upsert: true,
+    //     }
+    //   };
+    // });
     const ops = Object.entries(usageByTypeNumber).map(([key, used]) => {
-
-      const [rawType, number] = key.split("-");
-      const max = parseInt(allLimits[rawType] || "9999", 10);
+      const [rawType, number] = key.split('-');
+      const max = parseInt(allLimits[rawType] || '9999', 10);
       const usedToday = generalActualUsageMap[key] || 0;
-
       const newRemaining = Math.max(0, max - (usedToday + used));
 
       return {
@@ -3718,41 +3767,53 @@ const saveValidEntries = async (req, res) => {
       await DailyLimitUsage.bulkWrite(ops);
     }
 
-    /* ---------------- SUMMARY UPDATE ---------------- */
+    // Per-user daily limit update
+    // Update DailyUserLimit by setting the NEW remaining value after this save
+    const userSummaryMap = {}; // number-type -> totalCountInBatch
+    validEntries.forEach((e) => {
+      const key = `${extractBaseType(e.type)}-${e.number}`;
+      userSummaryMap[key] = (userSummaryMap[key] || 0) + (e.count || 1);
+    });
 
+    const userOps = await Promise.all(
+      Object.entries(userSummaryMap).map(async ([key, count]) => {
+        const [rawType, number] = key.split('-');
+        const max = parseInt(allLimits[rawType] || '9999', 10);
+        const usedToday = actualUsageMap[key] || 0;
+        const newRemaining = Math.max(0, max - (usedToday + count));
+
+        return {
+          updateOne: {
+            filter: { date: targetDateStr, user: loggedInUser, type: rawType, number },
+            update: { $set: { remaining: newRemaining } },
+            upsert: true,
+          },
+        };
+      })
+    );
+
+    if (userOps.length > 0) await DailyUserLimit.bulkWrite(userOps);
+    // 1️⃣1️⃣ Update SalesReportSummary Automatically
     try {
-
       const summaryUser = selectedAgent || createdBy || loggedInUser;
+      // Pass validEntries to the helper for aggregation (using targetDateStr)
+      await updateAutomaticSummary(summaryUser, targetDateStr, timeLabel, timeCode, validEntries);
 
-      await updateAutomaticSummary(
-        summaryUser,
-        todayStr,
-        timeLabel,
-        timeCode,
-        validEntries
-      );
-
+      // 1️⃣2️⃣ Clear local entries cache to ensure reports show fresh data
       entriesCache.clear();
       reportCache.clear();
-
-    } catch (err) {
-      console.error("Summary update error:", err);
+    } catch (summaryErr) {
+      console.error("❌ Error updating SalesReportSummary:", summaryErr);
     }
 
-    return res.json({
-      billNo: savedBill.billNo,
-      exceeded: allExceeded
-    });
+
+    return res.json({ billNo: savedBill.billNo, exceeded: allExceeded });
 
   } catch (err) {
-
-    console.error("Error saving entries:", err);
-
-    return res.status(500).json({
-      message: "Internal server error"
-    });
+    console.error('Error saving entries:', err);
+    return res.status(500).json({ message: 'Internal server error' });
   }
-};
+}
 // const saveValidEntries = async (req, res) => {
 //   try {
 //     const {
@@ -5818,13 +5879,6 @@ const syncSummaries = async (req, res) => {
 async function updateAutomaticSummary(username, dateStr, timeLabel, timeCode, newEntries) {
   try {
     const normUsername = normalizeName(username);
-    const allUsers = await MainUser.find().select("username _id createdBy");
-
-    const userMap = {};
-    allUsers.forEach(u => {
-      userMap[normalizeName(u.username)] = u._id;
-    });
-
     const drawKey = (timeLabel || "").trim().toUpperCase();
     const drawLabel = summaryLabelMap[drawKey] || drawKey;
 
@@ -5841,18 +5895,17 @@ async function updateAutomaticSummary(username, dateStr, timeLabel, timeCode, ne
     const totalCount = Object.values(schemeCounts).reduce((a, b) => a + b, 0);
 
     /* -------------------------------
-       2️⃣ Build hierarchy path
+       2️⃣ Build hierarchy path (Optimized)
     -------------------------------- */
-    const path = [];
-    let currentName = normUsername;
-    const visited = new Set();
+    const path = await getAncestors(normUsername);
+    const usersInPath = await MainUser.find({
+      username: { $in: path.map(u => new RegExp(`^${u}$`, 'i')) }
+    }).select("username _id").lean();
 
-    while (currentName && !visited.has(currentName)) {
-      visited.add(currentName);
-      path.push(currentName);
-      const user = allUsers.find(u => normalizeName(u.username) === currentName);
-      currentName = normalizeName(user?.createdBy);
-    }
+    const userMap = {};
+    usersInPath.forEach(u => {
+      userMap[normalizeName(u.username)] = u._id;
+    });
 
     /* -------------------------------
        3️⃣ CALCULATE CHILD RATES ONCE
@@ -6210,149 +6263,7 @@ const saveWinningReport = async (req, res) => {
       });
     }
 
-    const searchLabels = getSearchLabels(timeLabel);
-    const normalizedLabel = summaryLabelMap[timeLabel.toUpperCase()] || timeLabel;
-
-    /* =========================
-       1️⃣ FETCH USERS (HIERARCHY)
-    ========================= */
-
-    const users = await MainUser.find()
-      .select("username createdBy scheme")
-      .lean();
-
-    const userMap = {};
-    users.forEach(u => (userMap[u.username] = u));
-
-    function getAllDescendants(username, visited = new Set()) {
-      if (visited.has(username)) return [];
-      visited.add(username);
-
-      const children = users
-        .filter(u => u.createdBy === username)
-        .map(u => u.username);
-
-      let all = [...children];
-      children.forEach(c => {
-        all = all.concat(getAllDescendants(c, visited));
-      });
-      return all;
-    }
-
-    const agentUsers = [agent, ...getAllDescendants(agent)];
-
-    function getPath(username) {
-      const path = [];
-      let curr = userMap[username];
-      while (curr && curr.createdBy) {
-        path.unshift(curr.createdBy);
-        curr = userMap[curr.createdBy];
-      }
-      return path;
-    }
-
-    const createdByPath = getPath(agent);
-    const scheme = userMap[agent]?.scheme || "N/A";
-
-    // 🟢 Fetch Result
-    const resultDoc = await Result.findOne({ date, time: { $in: searchLabels } }).lean();
-    if (!resultDoc) {
-      return res.json({ message: `No result found for ${date} in ${searchLabels}`, saved: false });
-    }
-
-    const normalizedResult = {
-      "1": resultDoc.prizes?.[0] || null,
-      "2": resultDoc.prizes?.[1] || null,
-      "3": resultDoc.prizes?.[2] || null,
-      "4": resultDoc.prizes?.[3] || null,
-      "5": resultDoc.prizes?.[4] || null,
-      others: (resultDoc.entries || []).map(e => e.result).filter(Boolean)
-    };
-
-    // 🟢 Fetch Scheme (Schema)
-    const agentSchemeOrig = userMap[agent]?.scheme || "N/A";
-    let activeTab = 1;
-    if (agentSchemeOrig.toUpperCase() !== "N/A") {
-      activeTab = parseInt(agentSchemeOrig.replace(/[^0-9]/g, ""), 10) || 1;
-    }
-
-    const schemaDoc = await Schema.findOne(
-      { activeTab, "draws.drawName": { $in: searchLabels } },
-      { draws: { $elemMatch: { drawName: { $in: searchLabels } } } }
-    ).lean();
-    const drawSchemeData = schemaDoc?.draws?.[0];
-
-    /* =========================
-       2️⃣ FETCH ENTRIES (Direct Only)
-    ========================= */
-
-    const start = parseDateISTStart(date);
-    const end = parseDateISTEnd(date);
-
-    const winningEntries = await Entry.find({
-      createdBy: agent, // 🔑 Direct only to avoid duplication
-      isValid: true,
-      timeLabel: { $in: searchLabels },
-      date: { $gte: start, $lte: end }
-    }).lean();
-
-    if (!winningEntries.length) {
-      return res.json({
-        message: "No entries found",
-        saved: false
-      });
-    }
-
-    /* =========================
-       3️⃣ CALCULATE SUMMARY
-    ========================= */
-
-    const billSet = new Set();
-    const winCounts = {};
-    let totalPrize = 0;
-    let totalSuper = 0;
-    let totalWinningEntries = 0;
-
-    for (const e of winningEntries) {
-      const wins = calculateWinAmountFull(e, normalizedResult, drawSchemeData);
-      if (wins && wins.length > 0) {
-        billSet.add(e.billNo);
-        totalWinningEntries++;
-
-        for (const win of wins) {
-          totalPrize += win.prize;
-          totalSuper += win.superPrize;
-
-          const winType = win.winType;
-          if (winType) {
-            winCounts[winType] = (winCounts[winType] || 0) + (e.count || 0);
-          }
-        }
-      }
-    }
-
-    /* =========================
-       4️⃣ SAVE / UPDATE SUMMARY
-    ========================= */
-
-    const summary = await WinningSummary.findOneAndUpdate(
-      { date, timeLabel: { $in: searchLabels }, agent },
-      {
-        date,
-        timeLabel: normalizedLabel,
-        agent,
-        createdByPath,
-        scheme: agentSchemeOrig,
-
-        totalBills: billSet.size,
-        totalWinningEntries: 0,
-        totalBillAmount: 0,
-        totalWinningAmount: totalPrize,
-        superTotalAmount: totalPrize + totalSuper,
-        winCounts: winCounts
-      },
-      { upsert: true, new: true }
-    );
+    const summary = await saveWinningSummaryInternal({ date, timeLabel, agent });
 
     return res.json({
       message: "Winning report summary saved successfully",
