@@ -38,26 +38,16 @@ const computeWinType = (entry, results) => {
     if (baseType === "BOX") {
         const sortStr = (s) => s.split("").sort().join("");
         const numSorted = sortStr(num);
+        const firstPrize = results["1"];
 
-        // 1. Check Prizes 1-5
-        for (let i = 1; i <= 5; i++) {
-            const prize = results[String(i)];
-            if (!prize) continue;
+        if (!firstPrize) return [];
 
-            if (num === prize) {
-                wins.push(i === 1 ? "BOX perfect" : `BOX ${i} perfect`);
-            } else if (numSorted === sortStr(prize)) {
-                wins.push("BOX permutation"); // Any permutation goes to Pos 6
-            }
+        if (num === firstPrize) {
+            wins.push("BOX perfect"); // Maps to Pos 1
+        } else if (numSorted === sortStr(firstPrize)) {
+            wins.push("BOX permutation"); // Maps to Pos 6
         }
-
-        // 2. Check Others
-        for (const other of others) {
-            if (num === other || numSorted === sortStr(other)) {
-                wins.push("BOX other"); // Any "other" match goes to Pos 6
-            }
-        }
-        return [...new Set(wins)]; // De-duplicate if necessary
+        return wins;
     }
 
     if (["AB", "BC", "AC", "A", "B", "C"].includes(baseType)) {

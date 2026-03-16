@@ -124,6 +124,7 @@ const saveWinningSummaryInternal = async ({ date, timeLabel, agent }) => {
     // 4. Calculate Totals
     const billSet = new Set();
     const winCounts = {};
+    const winPrizes = {}; // 🔑 FIX: Initialize winPrizes to avoid ReferenceError
     let totalPrize = 0;
     let totalSuper = 0;
     let totalWinningEntries = 0;
@@ -153,7 +154,7 @@ const saveWinningSummaryInternal = async ({ date, timeLabel, agent }) => {
     }
 
     // 5. Save Summary (Update even if 0 to clear old data)
-    await WinningSummary.findOneAndUpdate(
+    const summary = await WinningSummary.findOneAndUpdate(
       { date, timeLabel: normalizedLabel, agent },
       {
         date,
@@ -173,6 +174,7 @@ const saveWinningSummaryInternal = async ({ date, timeLabel, agent }) => {
     );
 
     console.log(`✅ [Summary Update] ${agent} - Prize: ${totalPrize}, Super: ${totalSuper}`);
+    return summary;
   } catch (err) {
     console.error(`❌ Error updating winning summary for ${agent}:`, err);
   }

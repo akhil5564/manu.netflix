@@ -14,7 +14,7 @@ const blockNumberSchema = new mongoose.Schema({
   count: {
     type: Number,
     required: true,
-    min: 1,
+    min: 0,
     max: 999
   },
   group: {
