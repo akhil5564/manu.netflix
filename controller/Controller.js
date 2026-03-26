@@ -26,6 +26,7 @@ const {
   calculateWinAmount,
   calculateWinAmountFull
 } = require("../utils/winningUtils");
+const jwt = require('jsonwebtoken');
 
 
 
@@ -628,7 +629,7 @@ const updateUser = async (req, res) => {
     if (password && password.trim() !== '') {
       const hashedPassword = await bcrypt.hash(password, 10);
       updateData.password = hashedPassword;
-      updateData.nonHashedPassword = password;
+      // updateData.nonHashedPassword = password; // ❌ REMOVED
     }
     // console.log("updateData", updateData);
 
@@ -809,9 +810,17 @@ const loginUser = async (req, res) => {
 
     const isSalesBlocked = await isUserOrAncestorSalesBlocked(user.username);
 
+    // ✅ Generate JWT
+    const token = jwt.sign(
+      { id: user._id, username: user.username, userType: user.usertype },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
     // ✅ Structured login response (include hierarchical salesBlocked)
     return res.status(200).json({
       message: 'Login successful',
+      token, // 👈 Added token
       user: {
         id: user._id,
         username: user.username,
@@ -1569,7 +1578,7 @@ const createUser = async (req, res) => {
       name,
       username,
       password: hashedPassword,
-      nonHashedPassword: password,
+      // nonHashedPassword: password, // ❌ REMOVED SECURITY RISK
       scheme,
       createdBy,
       usertype, // ✅ added usertype to the document
@@ -1583,7 +1592,7 @@ const createUser = async (req, res) => {
         id: newUser._id,
         name: newUser.name,
         username: newUser.username,
-        nonHashedPassword: newUser.nonHashedPassword,
+        // nonHashedPassword: newUser.nonHashedPassword, // ❌ REMOVED SECURITY RISK
         scheme: newUser.scheme,
         createdBy: newUser.createdBy,
         usertype: newUser.usertype, // ✅ include in response
