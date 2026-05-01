@@ -421,6 +421,11 @@ const toggleSalesBlock = async (req, res) => {
   try {
     const { id } = req.params;
 
+    // 🛡️ Security Check: Admins only
+    if (req.user.userType !== 'admin') {
+      return res.status(403).json({ message: 'Access denied: Admins only' });
+    }
+
     // Find the user
     const user = await User.findById(id);
     if (!user) return res.status(404).json({ message: 'User not found' });
@@ -510,17 +515,32 @@ const countByNumber = async (req, res) => {
       return parts.length > 1 ? parts[parts.length - 2].toUpperCase() : parts[0].toUpperCase();
     };
 
+    // 🛡️ Security Check: Pre-fetch descendants if not admin
+    let allowedUsernames = [];
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      allowedUsernames = [req.user.username, ...descendants];
+    }
+
     // Prepare match conditions for MongoDB aggregation
     const matchConditions = keys.map((key) => {
       const parts = key.split('-');
       const number = parts[parts.length - 1];
       const type = normalizeType(key);
-      return {
+      const cond = {
         number,
         type: { $regex: `^${type}$`, $options: 'i' }, // exact match ignoring case
         timeLabel,
         date, // match the explicit date sent from frontend
       };
+
+      // 🛡️ Security Check: Enforce hierarchical filter if not admin
+      if (req.user.userType !== 'admin') {
+        // Since this is in a loop, we pre-fetch descendants once or use a simpler check?
+        // Actually, better to pre-fetch allowedUsernames outside the map if not admin.
+        cond.createdBy = { $in: allowedUsernames };
+      }
+      return cond;
     });
 
     // Aggregate total counts
@@ -574,6 +594,11 @@ const updatePasswordController = async (req, res) => {
     // Hash new password
     const hashedPassword = await bcrypt.hash(password, 10);
 
+    // 🛡️ Security Check: Ensure user matches or is admin
+    if (req.user.userType !== 'admin' && req.user.username.toLowerCase() !== username.toLowerCase()) {
+      return res.status(403).json({ message: 'Access denied: You can only update your own password' });
+    }
+
     // Update user password
     const updatedUser = await User.findOneAndUpdate(
       { username },
@@ -611,6 +636,11 @@ const updateUser = async (req, res) => {
 
     if (!id) {
       return res.status(400).json({ success: false, message: 'User ID is required' });
+    }
+
+    // 🛡️ Security Check: Ensure user matches or is admin
+    if (req.user.userType !== 'admin' && req.user.id !== id) {
+      return res.status(403).json({ success: false, message: 'Access denied: You can only update your own profile' });
     }
 
     // Build update object
@@ -794,7 +824,7 @@ const loginUser = async (req, res) => {
     });
 
     if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+      return res.status(401).json({ message: 'Invalid credentials' });
     }
 
     // ⛔ Check if the user or any Master is blocked
@@ -805,7 +835,7 @@ const loginUser = async (req, res) => {
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(401).json({ message: 'Invalid password' });
+      return res.status(401).json({ message: 'Invalid credentials' });
     }
 
     const isSalesBlocked = await isUserOrAncestorSalesBlocked(user.username);
@@ -1091,7 +1121,20 @@ const getEntries = async (req, res) => {
     // 🔨 Base query
     const query = { isValid: true };
 
-    if (createdBy) query.createdBy = createdBy;
+    // 🛡️ Security: Enforce hierarchical filter if not admin
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      
+      const targetUser = createdBy || req.user.username;
+      
+      if (!allowed.includes(targetUser)) {
+        return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      query.createdBy = targetUser;
+    } else if (createdBy) {
+      query.createdBy = createdBy;
+    }
     if (timeCode) query.timeCode = timeCode;
     if (timeLabel && timeLabel.toLowerCase() !== "all") {
       const normalized = summaryLabelMap[timeLabel.trim()] || timeLabel.trim().toUpperCase();
@@ -1297,8 +1340,19 @@ const invalidateEntry = async (req, res) => {
   try {
     const { id } = req.params;
 
+    const query = { _id: id, isValid: { $ne: false } };
+
+    const obj = await Entry.findById(id);
+    if (!obj) return res.status(404).json({ message: 'Entry not found' });
+
+    // 🛡️ Security Check: Ensure user matches or is admin or ancestor
+    const ancestorsOfCreator = await getAncestors(obj.createdBy);
+    if (req.user.userType !== 'admin' && !ancestorsOfCreator.includes(req.user.username)) {
+      return res.status(403).json({ message: 'Access denied: You can only invalidate your own or your descendants entries' });
+    }
+
     const updated = await Entry.findOneAndUpdate(
-      { _id: id, isValid: { $ne: false } }, // 🛡️ Only invalidate if it was valid
+      query,
       { isValid: false },
       { new: true }
     );
@@ -1313,7 +1367,7 @@ const invalidateEntry = async (req, res) => {
     const countDelta = -oldCount;
     const amountDelta = -oldRate;
     const scheme = extractBaseType(updated.type);
-    const dateStr = formatDateIST(new Date(updated.createdAt)); // 🔑 Use createdAt (transaction date)
+    const dateStr = formatDateIST(new Date(updated.date)); // 🔑 Use draw date
 
     await updateSummaryDelta(updated.createdBy, dateStr, updated.timeLabel, scheme, countDelta, amountDelta);
 
@@ -1345,6 +1399,12 @@ const deleteEntryById = async (req, res) => {
       return res.status(404).json({ message: 'Entry not found' });
     }
 
+    // 🛡️ Security Check: Ensure user matches or is admin or ancestor
+    const ancestorsOfCreator = await getAncestors(obj.createdBy);
+    if (req.user.userType !== 'admin' && !ancestorsOfCreator.includes(req.user.username)) {
+      return res.status(403).json({ message: 'Access denied: You can only delete your own or your descendants entries' });
+    }
+
     const usertype = userType;
     const timeLabel = obj.timeLabel;
     const blockTimeData = await getBlockTimeF(timeLabel, usertype);
@@ -1363,21 +1423,20 @@ const deleteEntryById = async (req, res) => {
       return res.status(400).json({ message: 'Cannot delete entry, Entry time is blocked for this draw' });
     }
 
-    if (obj.isValid !== false) {
-      // 🟢 Update SalesReportSummary incrementally (before deletion)
-      const oldCount = Number(obj.count) || 0;
-      const oldRate = Number(obj.rate || (obj.number.length === 1 ? 12 : 10) * oldCount);
-
-      const countDelta = -oldCount;
-      const amountDelta = -oldRate;
-      const scheme = extractBaseType(obj.type);
-      const dateStr = formatDateIST(new Date(obj.createdAt)); // 🔑 Use createdAt (transaction date)
-
-      await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
-    }
+    const oldCount = Number(obj.count) || 0;
+    const oldRate = Number(obj.rate || (obj.number.length === 1 ? 12 : 10) * oldCount);
+    const countDelta = -oldCount;
+    const amountDelta = -oldRate;
+    const scheme = extractBaseType(obj.type);
 
     // 🟢 Refund limits
-    await adjustEntryLimits(obj, -oldCount);
+    await adjustEntryLimits(obj, countDelta);
+
+    if (obj.isValid !== false) {
+      // 🟢 Update SalesReportSummary incrementally (before deletion)
+      const dateStr = formatDateIST(new Date(obj.date)); 
+      await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
+    }
 
     const deletedEntry = await Entry.findByIdAndDelete(id);
 
@@ -1410,7 +1469,11 @@ const deleteEntriesByBillNo = async (req, res) => {
     if (entriesToDelete.length === 0) {
       return res.status(404).json({ message: 'No entries found with this bill number' });
     }
-
+    // 🛡️ Security Check: Ensure user matches or is admin or ancestor
+    const ancestorsOfCreator = await getAncestors(entriesToDelete[0].createdBy);
+    if (req.user.userType !== 'admin' && !ancestorsOfCreator.includes(req.user.username)) {
+      return res.status(403).json({ message: 'Access denied: You can only delete your own or your descendants entries' });
+    }
     // 🟢 Update SalesReportSummary incrementally for each entry before deletion
     for (const obj of entriesToDelete) {
       if (obj.isValid === false) continue; // 🛡️ ALREADY SUBTRACTED (SKIP TO AVOID NEGATIVE VALUES)
@@ -1421,7 +1484,7 @@ const deleteEntriesByBillNo = async (req, res) => {
       const countDelta = -oldCount;
       const amountDelta = -oldRate;
       const scheme = extractBaseType(obj.type);
-      const dateStr = formatDateIST(new Date(obj.createdAt)); // 🔑 Use createdAt (transaction date)
+      const dateStr = formatDateIST(new Date(obj.date)); // 🔑 Use draw date (consistent with addEntries)
 
       await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
 
@@ -1899,9 +1962,20 @@ const getRateMaster = async (req, res) => {
       return res.status(400).json({ message: 'User and draw are required' });
     }
     let RateMasterQuery = {}
-    if (user) {
+    
+    // 🛡️ Security Check: Enforce hierarchical filter if not admin
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      const targetUser = user || req.user.username;
+      if (!allowed.includes(targetUser)) {
+        return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      RateMasterQuery.user = targetUser;
+    } else if (user) {
       RateMasterQuery.user = user
     }
+
     if (draw) {
       RateMasterQuery.draw = draw
     } if (draw === "LSK 3 PM") {
@@ -1933,6 +2007,12 @@ const updateEntryCount = async (req, res) => {
     const obj = await Entry.findById(id);
     if (!obj) return res.status(404).json({ message: 'Entry not found' });
 
+    // 🛡️ Security Check: Ensure user matches or is admin or ancestor
+    const ancestorsOfCreator = await getAncestors(obj.createdBy);
+    if (req.user.userType !== 'admin' && !ancestorsOfCreator.includes(req.user.username)) {
+      return res.status(403).json({ message: 'Access denied: You can only update your own or your descendants entries' });
+    }
+
     const usertype = userType;
     const timeLabel = obj.timeLabel;
     const blockTimeData = await getBlockTimeF(timeLabel, usertype);
@@ -1963,7 +2043,7 @@ const updateEntryCount = async (req, res) => {
     const countDelta = newCount - oldCount;
     const amountDelta = newRate - oldRate;
     const scheme = extractBaseType(obj.type);
-    const dateStr = formatDateIST(new Date(obj.createdAt)); // 🔑 Use createdAt (transaction date)
+    const dateStr = formatDateIST(new Date(obj.date)); // 🔑 Use draw date
 
     await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
 
@@ -1996,7 +2076,16 @@ const getCountReport = async (req, res) => {
       query.createdAt = { $gte: start, $lte: end };
     }
 
-    if (agent) {
+    // 🛡️ Security Check: Enforce hierarchical filter if not admin
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      const targetUser = agent || req.user.username;
+      if (!allowed.includes(targetUser)) {
+        return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      query.createdBy = targetUser;
+    } else if (agent) {
       query.createdBy = agent;
     }
 
@@ -2044,7 +2133,25 @@ const getCountReport = async (req, res) => {
 const getAllUsers = async (req, res) => {
   try {
     const { createdBy } = req.query;
-    const query = createdBy ? { createdBy } : {};
+    let query = {};
+
+    // 🛡️ Security Check: If not admin, restrict to descendants only
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowedUsernames = [req.user.username, ...descendants];
+      
+      if (createdBy) {
+        // If they requested a specific target, ensure it's in their tree
+        if (!allowedUsernames.includes(createdBy)) {
+          return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+        }
+        query = { username: createdBy };
+      } else {
+        query = { username: { $in: allowedUsernames } };
+      }
+    } else {
+      query = createdBy ? { createdBy } : {};
+    }
 
     // Use .lean() for better performance when we need to modify the objects
     const users = await MainUser.find(query).select('-password').lean();
@@ -2142,7 +2249,19 @@ function normalizeDrawLabel(label) {
   return drawLabelMap[label] || label;
 }
 const netPayMultiday = async (req, res) => {
-  const { fromDate, toDate, time, agent, fromAccountSummary, loggedInUser } = req.body;
+  let { fromDate, toDate, time, agent, fromAccountSummary, loggedInUser } = req.body;
+
+  // 🛡️ Security Check: Enforce hierarchical filter if not admin
+  if (req.user.userType !== 'admin') {
+    const descendants = await getAllDescendantsFlat(req.user.username);
+    const allowed = [req.user.username, ...descendants];
+    const targetUser = agent || loggedInUser || req.user.username;
+    if (!allowed.includes(targetUser)) {
+        return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+    }
+    loggedInUser = req.user.username;
+    agent = targetUser;
+  }
   // console.log('req.body=>>>>>>>>>>>>>>>>', req.body);
 
   try {
@@ -2799,7 +2918,18 @@ function formatDate(date) {
 
 const getWinningReport = async (req, res) => {
   try {
-    const { fromDate, toDate, time = "ALL", agent } = req.body;
+    let { fromDate, toDate, time = "ALL", agent } = req.body;
+
+    // 🛡️ Security Check: Enforce hierarchical filter if not admin
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      const targetUser = agent || req.user.username;
+      if (!allowed.includes(targetUser)) {
+        return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      agent = targetUser;
+    }
 
     if (!fromDate || !toDate) {
       return res.status(400).json({ message: "fromDate and toDate are required" });
@@ -4517,7 +4647,23 @@ function getDescendants(username, allUsers) {
 
 const getSalesReport = async (req, res) => {
   try {
-    const { fromDate, toDate, createdBy, timeLabel, loggedInUser } = req.query;
+    let { fromDate, toDate, createdBy, timeLabel, loggedInUser } = req.query;
+
+    // 🛡️ Security Check: Enforce hierarchical access if not admin
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      
+      const targetUser = createdBy || loggedInUser || req.user.username;
+      
+      if (!allowed.includes(normalizeName(targetUser))) {
+          return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      
+      // If valid, ensure the identity is consistent
+      loggedInUser = req.user.username;
+      createdBy = targetUser;
+    }
 
     console.log("📥 [getSalesReport] Request Query:", { fromDate, toDate, createdBy, timeLabel, loggedInUser });
 
@@ -4662,9 +4808,15 @@ const getSalesReport = async (req, res) => {
     }
 
     console.log(`🔍 [getSalesReport] Fetching Entry data...`);
-    const rawEntries = await Entry.find(entryQuery);
+    const rawEntries = await Entry.find(entryQuery).lean();
 
     if (rawEntries.length > 0) {
+      // 🚀 Optimization: Create a user map for O(1) lookups
+      const userLookupMap = {};
+      allUsers.forEach(u => {
+        userLookupMap[normalizeName(u.username)] = normalizeName(u.createdBy);
+      });
+
       // 🟢 Recalculate based on EACH seller's RateMaster for true branch accuracy
       const sellers = [...new Set(rawEntries.map(e => normalizeName(e.createdBy)))];
       const draws = [...new Set(rawEntries.map(e => (e.timeLabel || "").trim().toUpperCase()))];
@@ -4673,10 +4825,11 @@ const getSalesReport = async (req, res) => {
       if (!drawSearch.includes("All")) drawSearch.push("All");
 
       console.log(`🔍 [getSalesReport] Bulk fetching RateMasters for ${sellers.length} sellers...`);
+      // 🚀 Optimization: Avoid Regex searching if possible, or use a simpler match
       const allRateMasters = await RateMaster.find({
-        user: { $in: sellers.map(s => new RegExp(`^${s}$`, 'i')) },
+        user: { $in: sellers }, // Assuming normalized names match or using a case-insensitive collation if needed
         draw: { $in: drawSearch }
-      }).sort({ draw: -1 }); // Specific draw > "All"
+      }).lean();
 
       const rateMastersCache = {}; // key: seller|draw
       allRateMasters.forEach(rm => {
@@ -4707,8 +4860,9 @@ const getSalesReport = async (req, res) => {
         totalAmount += entryAmount;
 
         // 2. Group for the 'By Agent' breakdown list
-        let sellerDirectParent = normalizeName(allUsers.find(u => normalizeName(u.username) === normalizeName(sellerAgent))?.createdBy);
-        let groupingAgent = normalizeName(sellerAgent);
+        // 🚀 Optimization: Use userLookupMap instead of allUsers.find
+        let sellerDirectParent = userLookupMap[seller];
+        let groupingAgent = seller;
 
         if (groupingAgent !== targetUser && sellerDirectParent !== targetUser) {
           // It's a deep descendant, find the direct child of targetUser in the path
@@ -4716,7 +4870,7 @@ const getSalesReport = async (req, res) => {
           let ancestor = sellerDirectParent;
           while (ancestor && ancestor !== targetUser && !path.includes(ancestor)) {
             path.push(ancestor);
-            ancestor = normalizeName(allUsers.find(u => normalizeName(u.username) === ancestor)?.createdBy);
+            ancestor = userLookupMap[ancestor];
           }
           if (ancestor === targetUser) {
             groupingAgent = path[path.length - 1]; // The direct child of targetUser
@@ -5160,7 +5314,12 @@ const deleteBlockedNumber = async (req, res) => {
 // ✅ Get blocked numbers by user and draw time
 const getBlockedNumbersByUser = async (req, res) => {
   try {
-    const { createdBy, drawTime } = req.params;
+    let { createdBy, drawTime } = req.params;
+
+    // 🛡️ Security Check: Enforce user filter if not admin
+    if (req.user.userType !== 'admin') {
+      createdBy = req.user.username;
+    }
 
     if (!createdBy || !drawTime) {
       return res.status(400).json({
@@ -5225,7 +5384,24 @@ const bulkDeleteBlockedNumbers = async (req, res) => {
 // GET all overflow limits
 const getOverflowLimit = async (req, res) => {
   try {
-    const limits = await OverflowLimit.find();
+    let userFilter = req.query.user || "";
+
+    // 🛡️ Security Check: If not admin, restrict to descendants only
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      
+      if (userFilter) {
+        if (!allowed.includes(userFilter)) {
+          return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+        }
+      } else {
+        userFilter = { $in: allowed };
+      }
+    }
+
+    const query = userFilter ? { user: userFilter } : {};
+    const limits = await OverflowLimit.find(query);
     res.status(200).json(limits);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -5263,7 +5439,31 @@ const getOverflowLimitByDrawTime = async (req, res) => {
       });
     }
 
-    const data = await OverflowLimit.findOne({ drawTime });
+    // 🛡️ Security Check: If not admin, restrict to descendants only
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      const targetUser = req.query.user || req.user.username;
+
+      if (!allowed.includes(targetUser)) {
+        return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      
+      const data = await OverflowLimit.findOne({ 
+        user: targetUser, 
+        drawTime 
+      });
+      if (!data) return res.status(404).json({ message: 'No limit set' });
+      return res.status(200).json(data);
+    } else {
+       const userFilter = req.query.user || "";
+       const data = await OverflowLimit.findOne({ 
+          user: userFilter, 
+          drawTime 
+        });
+       if (!data) return res.status(404).json({ message: 'No limit set' });
+       return res.status(200).json(data);
+    }
 
     if (!data) {
       return res.status(404).json({
@@ -5508,7 +5708,13 @@ const addUserAmount = async (req, res) => {
 
 const getUserAmounts = async (req, res) => {
   try {
-    const { toUser } = req.query;
+    let { toUser } = req.query;
+
+    // 🛡️ Security Check: Enforce user filter if not admin
+    if (req.user.userType !== 'admin') {
+      toUser = req.user.username;
+    }
+
     const filter = {};
     if (toUser) filter.toUser = toUser;
 
@@ -6152,7 +6358,19 @@ const createSalesReportSummary = async (req, res) => {
 
 const getSalesReportSummary = async (req, res) => {
   try {
-    const { fromDate, toDate, drawTime, userId, createdBy } = req.query;
+    let { fromDate, toDate, drawTime, userId, createdBy } = req.query;
+
+    // 🛡️ Security Check: Enforce hierarchical filter if not admin
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      const targetUser = createdBy || req.user.username;
+      if (!allowed.includes(targetUser)) {
+          return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      createdBy = targetUser;
+      userId = undefined; 
+    }
 
     const filter = {};
 
@@ -6326,7 +6544,19 @@ const getSuperPrizeForWinType = (winType, drawSchemeData, fallbackSuper = 0) => 
 
 const getWinningReportSummary = async (req, res) => {
   try {
-    const { fromDate, toDate, time = "ALL", agent, loggedInUser } = req.body;
+    let { fromDate, toDate, time = "ALL", agent, loggedInUser } = req.body;
+
+    // 🛡️ Security Check: Enforce hierarchical filter if not admin
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      const targetUser = agent || loggedInUser || req.user.username;
+      if (!allowed.includes(targetUser)) {
+          return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      agent = targetUser;
+      loggedInUser = req.user.username;
+    }
 
     if (!fromDate || !toDate) {
       return res.status(400).json({ message: "fromDate and toDate are required" });

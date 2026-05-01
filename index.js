@@ -32,7 +32,7 @@ app.use(helmet());
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  max: 5000, // limit each IP to 100 requests per windowMs
   message: 'Too many requests from this IP, please try again after 15 minutes'
 });
 
@@ -45,9 +45,8 @@ const loginLimiter = rateLimit({
   max: 10, // limit each IP to 10 login attempts per hour
   message: 'Too many login attempts from this IP, please try again after an hour'
 });
-app.post('/login', loginLimiter, Controller.loginUser);
 
-
+app.post('/login', Controller.loginUser);
 
 
 // Routes
@@ -67,8 +66,8 @@ app.get('/entries', authMiddleware, Controller.getEntries);
 app.get('/get-entries-with-timeblock', authMiddleware, Controller.getEntriesWithTimeBlock);
 app.get('/next-bill', authMiddleware, Controller.getNextBillNumber);
 app.patch('/invalidateEntry/:id', authMiddleware, Controller.invalidateEntry);
-app.delete('/deleteEntryById/:id/:userType', authMiddleware, adminMiddleware, Controller.deleteEntryById);
-app.delete('/deleteEntriesByBillNo/:billNo', authMiddleware, adminMiddleware, Controller.deleteEntriesByBillNo);
+app.delete('/deleteEntryById/:id/:userType', authMiddleware, Controller.deleteEntryById);
+app.delete('/deleteEntriesByBillNo/:billNo', authMiddleware, Controller.deleteEntriesByBillNo);
 app.put('/updateEntryCount/:id', authMiddleware, Controller.updateEntryCount);
 app.get('/report/count', authMiddleware, Controller.getCountReport);
 app.get('/ratemaster', authMiddleware, Controller.getRateMaster);
@@ -81,7 +80,7 @@ app.get('/blockTimes', authMiddleware, adminMiddleware, Controller.getAllBlockTi
 app.post('/countByNumber', authMiddleware, Controller.countByNumber);
 app.get('/getticketLimit', authMiddleware, Controller.getLatestTicketLimit);
 app.patch("/user/blockLogin/:id", authMiddleware, adminMiddleware, Controller.toggleLoginBlock);
-app.patch('/blockSales/:id', authMiddleware, authMiddleware, Controller.toggleSalesBlock); // 👈 Corrected double middleware if accidental, but ensured auth
+app.patch('/blockSales/:id', authMiddleware, adminMiddleware, Controller.toggleSalesBlock);
 app.put('/users/:username', authMiddleware, Controller.updatePasswordController);
 app.put('/users/update/:id', authMiddleware, Controller.updateUser);
 app.delete('/users/:id', authMiddleware, adminMiddleware, Controller.deleteUser);
@@ -112,7 +111,7 @@ app.get('/get-amount', authMiddleware, Controller.getUserAmounts);
 app.patch('/user-amount/:id/amount', authMiddleware, adminMiddleware, Controller.updateAmountOnly);
 app.delete('/user-amount/:id', authMiddleware, adminMiddleware, Controller.deleteUserAmount);
 
-app.post('/sales-report-summary', authMiddleware, Controller.createSalesReportSummary);
+app.post('/sales-report-summary', authMiddleware, adminMiddleware, Controller.createSalesReportSummary);
 app.get('/sales-report-summary', authMiddleware, Controller.getSalesReportSummary);
 app.put('/sales-report-summary/:id', authMiddleware, adminMiddleware, Controller.updateSalesReportSummary);
 
@@ -132,7 +131,7 @@ app.post("/winning/summary", authMiddleware, Controller.getWinningReportSummary)
 
 
 
-const port = process.env.PORT || 6000;
+const port = process.env.PORT || 8080;
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
   console.log(`📦 MONGO_URI: ${process.env.MONGO_URI ? "Loaded ✅" : "Missing ❌"}`);
