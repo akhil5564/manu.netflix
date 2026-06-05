@@ -8,7 +8,8 @@ const EntrySchema = new mongoose.Schema({
   timeCode: String,
   createdBy: String,
   billNo: Number,
-  name:String,
+
+  name: String,
   rate: { type: Number }, // FIXED
 
   toggleCount: Number,
@@ -23,4 +24,4 @@ const EntrySchema = new mongoose.Schema({
   },
 });
 
-module.exports = mongoose.model('Entry', EntrySchema);
+module.exports = mongoose.models.Entry || mongoose.model('Entry', EntrySchema);

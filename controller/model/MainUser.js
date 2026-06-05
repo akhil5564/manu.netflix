@@ -7,7 +7,7 @@ const mainUserSchema = new mongoose.Schema({
   nonHashedPassword: String,
   scheme: String,
   createdBy: String,
-    usertype: {
+  usertype: {
     type: String,
     enum: ['master', 'sub'], // restrict to two roles
     default: 'sub',
@@ -20,4 +20,4 @@ const mainUserSchema = new mongoose.Schema({
 
 });
 
-module.exports = mongoose.model('MainUser', mainUserSchema);
+module.exports = mongoose.models.MainUser || mongoose.model('MainUser', mainUserSchema);

@@ -1,4 +1,4 @@
-
+//ratemaster and sales report working updated rate is adding to both schema parent rate problem
 const MainUser = require('./model/MainUser');
 const Entry = require('./model/Entry');
 const bcrypt = require('bcryptjs');
@@ -14,7 +14,21 @@ const BlockDate = require("./model/BlockDate");
 const BlockNumber = require("./model/BlockNumber");
 const DailyUserLimit = require('./model/DailyUserLimit');
 const OverflowLimit = require('../model/OverflowLimit');
-const Schema=require('../model/Schema')
+const Schema = require('../model/Schema')
+const UserAmount = require('../model/FixAmount')
+const { getCache, setCache } = require("../utils/cache");
+const SalesReportSummary = require("../model/Summary");
+const WinningSummary = require("../model/winningsummmary");
+const { saveWinningSummaryInternal } = require("../sevices/winningSummary.service");
+const {
+  extractBaseType,
+  computeWinType,
+  calculateWinAmount,
+  calculateWinAmountFull
+} = require("../utils/winningUtils");
+const jwt = require('jsonwebtoken');
+
+
 
 // =======================
 // 📌 Date Utilities for IST (Indian Standard Time - UTC+5:30)
@@ -49,6 +63,183 @@ function formatDateIST(date) {
   return `${year}-${month}-${day}`;
 }
 
+const normalizeName = (name) => (name || "").toString().trim();
+
+/**
+ * Get standard default rate for a ticket type
+ * A, B, C -> 12
+ * SUPER, BOX, AB, BC, AC -> 10
+ */
+const getRateForType = (type) => {
+  const t = (type || "").toUpperCase();
+  if (["A", "B", "C"].includes(t)) return 12;
+  return 10;
+};
+
+// Global standardization map for Draw Labels
+const summaryLabelMap = {
+  "DEAR 1 PM": "DEAR 1 PM",
+  "DEAR 1PM": "DEAR 1 PM",
+  "KERALA 3 PM": "KERALA 3 PM",
+  "KERALA 3PM": "KERALA 3 PM",
+  "LSK 3 PM": "KERALA 3 PM",
+  "LSK 3PM": "KERALA 3 PM",
+  "DEAR 6 PM": "DEAR 6 PM",
+  "DEAR 6PM": "DEAR 6 PM",
+  "DEAR 8 PM": "DEAR 8 PM",
+  "DEAR 8PM": "DEAR 8 PM"
+};
+
+const LABEL_GROUPS = [
+  ["DEAR 1 PM", "DEAR 1PM", "D-1", "D-1-", "DEAR1"],
+  ["KERALA 3 PM", "KERALA 3PM", "LSK 3 PM", "LSK 3PM", "LSK", "LSK3"],
+  ["DEAR 6 PM", "DEAR 6PM", "D-6", "D-6-", "DEAR6"],
+  ["DEAR 8 PM", "DEAR 8PM", "D-8", "D-8-", "DEAR8"]
+];
+
+const getSearchLabels = (label) => {
+  if (!label) return [];
+  const normalized = label.toString().toUpperCase().trim();
+  const normalizedNoSpace = normalized.replace(/\s+/g, "");
+
+  const group = LABEL_GROUPS.find(g =>
+    g.some(alias => {
+      const a = alias.toUpperCase();
+      return a === normalized || a.replace(/\s+/g, "") === normalizedNoSpace;
+    })
+  );
+
+  if (group) return group;
+  return [label];
+};
+
+// extractBaseType moved to winningUtils.js
+
+/**
+ * Refund or adjust limits in DailyLimitUsage and DailyUserLimit
+ */
+const adjustEntryLimits = async (entry, countDelta) => {
+  try {
+    const rawType = extractBaseType(entry.type);
+    const dateStr = formatDateIST(new Date(entry.date));
+    const number = entry.number;
+    const user = entry.createdBy;
+
+    // Update DailyLimitUsage
+    await DailyLimitUsage.updateOne(
+      { date: dateStr, type: rawType, number: number },
+      { $inc: { remaining: -countDelta } }
+    );
+
+    // Update DailyUserLimit
+    await DailyUserLimit.updateOne(
+      { date: dateStr, user: user, type: rawType, number: number },
+      { $inc: { remaining: -countDelta } }
+    );
+  } catch (err) {
+    console.error('❌ [adjustEntryLimits] Error:', err);
+  }
+};
+
+/**
+ * Bulk fetch actual usage for a user and date for specific keys (TYPE-NUMBER)
+ */
+const getActualUsageMap = async (dateStr, user, keys) => {
+  try {
+    const start = parseDateISTStart(dateStr);
+    const end = parseDateISTEnd(dateStr);
+
+    const entries = await Entry.find({
+      createdBy: user,
+      date: { $gte: start, $lte: end },
+      isValid: true
+    }).lean();
+
+    const map = {};
+    keys.forEach(k => map[k] = 0);
+
+    entries.forEach(e => {
+      const type = extractBaseType(e.type);
+      const key = `${type}-${e.number}`;
+      if (map[key] !== undefined) {
+        map[key] += (Number(e.count) || 0);
+      }
+    });
+    return map;
+  } catch (err) {
+    console.error('❌ [getActualUsageMap] Error:', err);
+    return {};
+  }
+};
+
+/**
+ * Bulk fetch actual usage for all users for specific keys (TYPE-NUMBER)
+ */
+const getGeneralActualUsageMap = async (dateStr, keys) => {
+  try {
+    const start = parseDateISTStart(dateStr);
+    const end = parseDateISTEnd(dateStr);
+
+    const entries = await Entry.find({
+      date: { $gte: start, $lte: end },
+      isValid: true
+    }).lean();
+
+    const map = {};
+    keys.forEach(k => map[k] = 0);
+
+    entries.forEach(e => {
+      const type = extractBaseType(e.type);
+      const key = `${type}-${e.number}`;
+      if (map[key] !== undefined) {
+        map[key] += (Number(e.count) || 0);
+      }
+    });
+    return map;
+  } catch (err) {
+    console.error('❌ [getGeneralActualUsageMap] Error:', err);
+    return {};
+  }
+};
+
+/**
+ * Bulk fetch hierarchical usage map for an ancestor and all their descendants for specific keys (TYPE-NUMBER)
+ */
+const getHierarchicalActualUsageMap = async (dateStr, ancestor, allUsers, keys) => {
+  try {
+    const start = parseDateISTStart(dateStr);
+    const end = parseDateISTEnd(dateStr);
+
+    const normAncestor = normalizeName(ancestor);
+    const descendants = getDescendants(normAncestor, allUsers); // Assuming getDescendants is defined elsewhere
+    const agentList = [normAncestor, ...descendants];
+
+    const entries = await Entry.find({
+      createdBy: { $in: agentList },
+      date: { $gte: start, $lte: end },
+      isValid: true
+    }).lean();
+
+    const map = {};
+    keys.forEach(k => map[k] = 0);
+
+    entries.forEach(e => {
+      const type = extractBaseType(e.type);
+      const key = `${type}-${e.number}`;
+      if (map[key] !== undefined) {
+        map[key] += (Number(e.count) || 0);
+      }
+    });
+    return map;
+  } catch (err) {
+    console.error('❌ [getHierarchicalActualUsageMap] Error:', err);
+    return {};
+  }
+};
+
+
+
+
 
 
 
@@ -72,13 +263,16 @@ const parseTimeValue = (time) => {
     return null;
   }
 
-  // Normalize different time formats to standard format
-  if (time === 'DEAR 1PM' || time === 'DEAR 1 PM' || time === 'DEAR1PM') {
+  // Normalize to NO SPACE format (standard for Result collection)
+  const t = time.toString().toUpperCase();
+  if (t.includes('DEAR 1') || t.includes('DEAR1')) {
     return 'DEAR 1PM';
-  } else if (time === 'DEAR 8PM' || time === 'DEAR 8 PM' || time === 'DEAR8PM') {
+  } else if (t.includes('DEAR 8') || t.includes('DEAR8')) {
     return 'DEAR 8PM';
-  } else if (time === 'DEAR 6PM' || time === 'DEAR 6 PM' || time === 'DEAR6PM') {
+  } else if (t.includes('DEAR 6') || t.includes('DEAR6')) {
     return 'DEAR 6PM';
+  } else if (t.includes('LSK') || t.includes('KERALA')) {
+    return 'KERALA 3PM';
   } else {
     return 'KERALA 3PM'; // Default fallback
   }
@@ -227,6 +421,11 @@ const toggleSalesBlock = async (req, res) => {
   try {
     const { id } = req.params;
 
+    // 🛡️ Security Check: Admins only
+    if (req.user.userType !== 'admin') {
+      return res.status(403).json({ message: 'Access denied: Admins only' });
+    }
+
     // Find the user
     const user = await User.findById(id);
     if (!user) return res.status(404).json({ message: 'User not found' });
@@ -316,17 +515,32 @@ const countByNumber = async (req, res) => {
       return parts.length > 1 ? parts[parts.length - 2].toUpperCase() : parts[0].toUpperCase();
     };
 
+    // 🛡️ Security Check: Pre-fetch descendants if not admin
+    let allowedUsernames = [];
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      allowedUsernames = [req.user.username, ...descendants];
+    }
+
     // Prepare match conditions for MongoDB aggregation
     const matchConditions = keys.map((key) => {
       const parts = key.split('-');
       const number = parts[parts.length - 1];
       const type = normalizeType(key);
-      return {
+      const cond = {
         number,
         type: { $regex: `^${type}$`, $options: 'i' }, // exact match ignoring case
         timeLabel,
         date, // match the explicit date sent from frontend
       };
+
+      // 🛡️ Security Check: Enforce hierarchical filter if not admin
+      if (req.user.userType !== 'admin') {
+        // Since this is in a loop, we pre-fetch descendants once or use a simpler check?
+        // Actually, better to pre-fetch allowedUsernames outside the map if not admin.
+        cond.createdBy = { $in: allowedUsernames };
+      }
+      return cond;
     });
 
     // Aggregate total counts
@@ -380,6 +594,11 @@ const updatePasswordController = async (req, res) => {
     // Hash new password
     const hashedPassword = await bcrypt.hash(password, 10);
 
+    // 🛡️ Security Check: Ensure user matches or is admin
+    if (req.user.userType !== 'admin' && req.user.username.toLowerCase() !== username.toLowerCase()) {
+      return res.status(403).json({ message: 'Access denied: You can only update your own password' });
+    }
+
     // Update user password
     const updatedUser = await User.findOneAndUpdate(
       { username },
@@ -419,6 +638,11 @@ const updateUser = async (req, res) => {
       return res.status(400).json({ success: false, message: 'User ID is required' });
     }
 
+    // 🛡️ Security Check: Ensure user matches or is admin
+    if (req.user.userType !== 'admin' && req.user.id !== id) {
+      return res.status(403).json({ success: false, message: 'Access denied: You can only update your own profile' });
+    }
+
     // Build update object
     const updateData = {};
 
@@ -435,7 +659,7 @@ const updateUser = async (req, res) => {
     if (password && password.trim() !== '') {
       const hashedPassword = await bcrypt.hash(password, 10);
       updateData.password = hashedPassword;
-      updateData.nonHashedPassword = password;
+      // updateData.nonHashedPassword = password; // ❌ REMOVED
     }
     // console.log("updateData", updateData);
 
@@ -454,7 +678,7 @@ const updateUser = async (req, res) => {
     }
 
     // Return updated user (excluding sensitive data)
-    const { password: _, nonHashedPassword: __, ...userResponse } = updatedUser.toObject();
+    const { password: _, ...userResponse } = updatedUser.toObject();
 
     return res.status(200).json({
       success: true,
@@ -531,6 +755,62 @@ const getNextBillNumber = async () => {
   return result.counter.toString().padStart(5, '0'); // ➜ '00001', '00002', ...
 };
 
+const getAncestors = async (username, visited = new Set()) => {
+  if (!username) return [];
+  const norm = username.toLowerCase();
+  if (visited.has(norm)) return [];
+  visited.add(norm);
+
+  const user = await MainUser.findOne({
+    username: { $regex: new RegExp(`^${username}$`, 'i') }
+  }).select("username createdBy").lean();
+
+  if (!user) return [username];
+
+  let ancestors = [user.username];
+  if (user.createdBy && user.createdBy.toLowerCase() !== 'admin') {
+    const parentAncestors = await getAncestors(user.createdBy, visited);
+    ancestors = ancestors.concat(parentAncestors);
+  }
+
+  return ancestors;
+};
+
+/**
+ * Helper to get all descendants of a user (usernames only).
+ */
+const getAllDescendantsFlat = async (username) => {
+  // Case-insensitive search for children createdBy this user
+  const users = await MainUser.find({
+    createdBy: { $regex: new RegExp(`^${username}$`, 'i') }
+  });
+
+  let descendants = users.map(u => u.username);
+
+  for (const child of users) {
+    const childDescendants = await getAllDescendantsFlat(child.username);
+    descendants = descendants.concat(childDescendants);
+  }
+
+  return descendants;
+};
+
+const isUserOrAncestorBlocked = async (username) => {
+  const ancestors = await getAncestors(username);
+  const users = await MainUser.find({
+    username: { $in: ancestors.map(a => new RegExp(`^${a}$`, 'i')) }
+  }).select("blocked").lean();
+  return users.some(u => u.blocked);
+};
+
+const isUserOrAncestorSalesBlocked = async (username) => {
+  const ancestors = await getAncestors(username);
+  const users = await MainUser.find({
+    username: { $in: ancestors.map(a => new RegExp(`^${a}$`, 'i')) }
+  }).select("salesBlocked").lean();
+  return users.some(u => u.salesBlocked);
+};
+
 const loginUser = async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -544,28 +824,39 @@ const loginUser = async (req, res) => {
     });
 
     if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+      return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    // ⛔ Check if the user is blocked
-    if (user.blocked) {
-      return res.status(403).json({ message: 'User is blocked. Contact admin.' });
+    // ⛔ Check if the user or any Master is blocked
+    const isBlocked = await isUserOrAncestorBlocked(user.username);
+    if (isBlocked) {
+      return res.status(403).json({ message: 'User or Master is blocked. Contact admin.' });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(401).json({ message: 'Invalid password' });
+      return res.status(401).json({ message: 'Invalid credentials' });
     }
 
-    // ✅ Structured login response (include salesBlocked)
+    const isSalesBlocked = await isUserOrAncestorSalesBlocked(user.username);
+
+    // ✅ Generate JWT
+    const token = jwt.sign(
+      { id: user._id, username: user.username, userType: user.usertype },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    // ✅ Structured login response (include hierarchical salesBlocked)
     return res.status(200).json({
       message: 'Login successful',
+      token, // 👈 Added token
       user: {
         id: user._id,
         username: user.username,
         userType: user.usertype,
         scheme: user.scheme || null,
-        salesBlocked: user.salesBlocked ?? false, // ✅ FIX
+        salesBlocked: isSalesBlocked,
         isLoginBlocked: user.blocked
       },
     });
@@ -582,6 +873,222 @@ const loginUser = async (req, res) => {
 
 // ✅ Get Entries (filterable)
 
+// const getEntries = async (req, res) => {
+//   try {
+//     const {
+//       createdBy,
+//       timeCode,
+//       timeLabel,
+//       number,
+//       count,
+//       date,
+//       billNo,
+//       fromDate,
+//       toDate,
+//       loggedInUser,
+//       usertype
+//     } = req.query;
+
+//     const query = { isValid: true };
+
+//     if (createdBy) query.createdBy = createdBy;
+//     if (timeCode) query.timeCode = timeCode;
+//     if (timeLabel) query.timeLabel = timeLabel;
+//     if (number) query.number = number;
+//     if (count) query.count = parseInt(count);
+//     if (billNo) query.billNo = billNo;
+
+//     // Single date filter (using "date" field)
+//     if (date) {
+//       const start = new Date(date);
+//       start.setHours(0, 0, 0, 0);
+//       const end = new Date(date);
+//       end.setHours(23, 59, 59, 999);
+//       query.date = { $gte: start, $lte: end };
+//     }
+//     // Date range filter (using "date" field)
+//     else if (fromDate && toDate) {
+//       const start = new Date(fromDate);
+//       start.setHours(0, 0, 0, 0);
+//       const end = new Date(toDate);
+//       end.setHours(23, 59, 59, 999);
+//       query.date = { $gte: start, $lte: end };
+//     }
+
+//     // Sort primarily by date, secondarily by createdAt
+//     const entries = await Entry.find(query).sort({ date: -1, createdAt: -1 });
+//     // console.log('entries===========', entries) 
+//     // If loggedInUser exists → adjust rates
+//     if (loggedInUser && entries.length > 0) {
+//       // Get unique draws
+//       const uniqueDraws = [...new Set(entries.map(e => e.timeLabel))];
+
+//       // Fetch rate masters for this user
+//       const rateMastersByDraw = {};
+//       for (const draw of uniqueDraws) {
+//         let rateMasterQuery = { user: loggedInUser, draw };
+//         if (draw === "LSK 3 PM") {
+//           rateMasterQuery.draw = "KERALA 3 PM"; // your special case
+//         }
+
+//         const rateMaster = await RateMaster.findOne(rateMasterQuery);
+//         const rateLookup = {};
+//         (rateMaster?.rates || []).forEach(r => {
+//           rateLookup[r.label] = Number(r.rate) || 10;
+//         });
+//         rateMastersByDraw[draw] = rateLookup;
+//       }
+
+//       // Apply rates to entries
+//       const extractBetType = (typeStr) => {
+//         if (!typeStr) return "SUPER";
+//         if (typeStr.toUpperCase().includes("SUPER")) return "SUPER";
+//         if (typeStr.toUpperCase().includes("BOX")) return "BOX";
+//         if (typeStr.toUpperCase().includes("AB")) return "AB";
+//         if (typeStr.toUpperCase().includes("BC")) return "BC";
+//         if (typeStr.toUpperCase().includes("AC")) return "AC";
+//         if (typeStr.includes("-A") || typeStr.endsWith("A")) return "A";
+//         if (typeStr.includes("-B") || typeStr.endsWith("B")) return "B";
+//         if (typeStr.includes("-C") || typeStr.endsWith("C")) return "C";
+//         return typeStr.split("-").pop();
+//       };
+
+//       entries.forEach(e => {
+//         const betType = extractBetType(e.type);
+//         const rateLookup = rateMastersByDraw[e.timeLabel] || {};
+//         const rate = rateLookup[betType] ?? 10; // fallback default
+//         e.rate = rate * (Number(e.count) || 0);
+//       });
+//     }
+//     res.status(200).json(entries);
+//   } catch (error) {
+//     console.error("[GET ENTRIES ERROR]", error);
+//     res.status(500).json({ message: "Failed to fetch entries" });
+//   }
+// };
+const entriesCache = new Map();
+const rateMasterCache = new Map();
+
+// cache TTLs
+const ENTRIES_TTL = 60 * 1000; // 60 seconds
+const RATE_TTL = 10 * 60 * 1000; // 10 minutes
+
+
+// const getEntries = async (req, res) => {
+//   try {
+//     const {
+//       createdBy,
+//       timeCode,
+//       timeLabel,
+//       number,
+//       count,
+//       date,
+//       billNo,
+//       fromDate,
+//       toDate,
+//       loggedInUser,
+//       usertype
+//     } = req.query;
+
+//     // 🔑 1. Build cache key
+//     const cacheKey = `entries:${JSON.stringify(req.query)}`;
+
+//     // 🔍 2. Check entries cache
+//     const cached = entriesCache.get(cacheKey);
+//     if (cached && cached.expiry > Date.now()) {
+//       return res.status(200).json(cached.data);
+//     }
+
+//     // 🔨 3. Build DB query
+//     const query = { isValid: true };
+
+//     if (createdBy) query.createdBy = createdBy;
+//     if (timeCode) query.timeCode = timeCode;
+//     if (timeLabel) query.timeLabel = timeLabel;
+//     if (number) query.number = number;
+//     if (count) query.count = parseInt(count);
+//     if (billNo) query.billNo = billNo;
+
+//     if (date) {
+//       const start = new Date(date);
+//       start.setHours(0, 0, 0, 0);
+//       const end = new Date(date);
+//       end.setHours(23, 59, 59, 999);
+//       query.date = { $gte: start, $lte: end };
+//     } else if (fromDate && toDate) {
+//       const start = new Date(fromDate);
+//       start.setHours(0, 0, 0, 0);
+//       const end = new Date(toDate);
+//       end.setHours(23, 59, 59, 999);
+//       query.date = { $gte: start, $lte: end };
+//     }
+
+//     // 🗄 DB call
+//     const entries = await Entry.find(query).sort({ date: -1, createdAt: -1 });
+
+//     // 🔁 Apply rate logic
+//     if (loggedInUser && entries.length > 0) {
+//       const uniqueDraws = [...new Set(entries.map(e => e.timeLabel))];
+
+//       for (const draw of uniqueDraws) {
+//         const rateKey = `rate:${loggedInUser}:${draw}`;
+
+//         let rateLookup;
+//         const cachedRate = rateMasterCache.get(rateKey);
+
+//         if (cachedRate && cachedRate.expiry > Date.now()) {
+//           rateLookup = cachedRate.data;
+//         } else {
+//           let rateMasterQuery = { user: loggedInUser, draw };
+//           if (draw === "LSK 3 PM") {
+//             rateMasterQuery.draw = "KERALA 3 PM";
+//           }
+
+//           const rateMaster = await RateMaster.findOne(rateMasterQuery);
+
+//           rateLookup = {};
+//           (rateMaster?.rates || []).forEach(r => {
+//             rateLookup[r.label] = Number(r.rate) || 10;
+//           });
+
+//           rateMasterCache.set(rateKey, {
+//             data: rateLookup,
+//             expiry: Date.now() + RATE_TTL
+//           });
+//         }
+
+//         entries.forEach(e => {
+//           if (e.timeLabel !== draw) return;
+
+//           const type = e.type?.toUpperCase() || "SUPER";
+//           let betType = "SUPER";
+//           if (type.includes("BOX")) betType = "BOX";
+//           else if (type.includes("AB")) betType = "AB";
+//           else if (type.includes("BC")) betType = "BC";
+//           else if (type.includes("AC")) betType = "AC";
+//           else if (type.endsWith("A")) betType = "A";
+//           else if (type.endsWith("B")) betType = "B";
+//           else if (type.endsWith("C")) betType = "C";
+
+//           const rate = rateLookup[betType] ?? 10;
+//           e.rate = rate * (Number(e.count) || 0);
+//         });
+//       }
+//     }
+
+//     // 💾 4. Save final response to cache
+//     entriesCache.set(cacheKey, {
+//       data: entries,
+//       expiry: Date.now() + ENTRIES_TTL
+//     });
+
+//     res.status(200).json(entries);
+//   } catch (error) {
+//     console.error("[GET ENTRIES ERROR]", error);
+//     res.status(500).json({ message: "Failed to fetch entries" });
+//   }
+// };
+
 const getEntries = async (req, res) => {
   try {
     const {
@@ -595,86 +1102,109 @@ const getEntries = async (req, res) => {
       fromDate,
       toDate,
       loggedInUser,
-      usertype
+      usertype,
+      after,            // ⭐ auto-load cursor
+      limit = 20        // ⭐ batch size
     } = req.query;
 
+    // ❗ Skip cache for auto-load calls
+    const useCache = !after;
+    const cacheKey = `entries:${JSON.stringify(req.query)}`;
+
+    if (useCache) {
+      const cached = entriesCache.get(cacheKey);
+      if (cached && cached.expiry > Date.now()) {
+        return res.status(200).json(cached.data);
+      }
+    }
+
+    // 🔨 Base query
     const query = { isValid: true };
 
-    if (createdBy) query.createdBy = createdBy;
+    // 🛡️ Security: Enforce hierarchical filter if not admin
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      
+      const targetUser = createdBy || req.user.username;
+      
+      if (!allowed.includes(targetUser)) {
+        return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      query.createdBy = targetUser;
+    } else if (createdBy) {
+      query.createdBy = createdBy;
+    }
     if (timeCode) query.timeCode = timeCode;
-    if (timeLabel) query.timeLabel = timeLabel;
+    if (timeLabel && timeLabel.toLowerCase() !== "all") {
+      const normalized = summaryLabelMap[timeLabel.trim()] || timeLabel.trim().toUpperCase();
+      if (normalized === "KERALA 3 PM") {
+        query.timeLabel = { $in: ["KERALA 3 PM", "LSK 3 PM"] };
+      } else {
+        query.timeLabel = timeLabel;
+      }
+    }
     if (number) query.number = number;
     if (count) query.count = parseInt(count);
     if (billNo) query.billNo = billNo;
 
-    // Single date filter (using "date" field)
+    // ✅ FIX: Separately handle designated draw date and pagination cursor
+    const createdAtQuery = {};
+    if (after) {
+      createdAtQuery.$lt = new Date(after);
+      query.createdAt = createdAtQuery;
+    }
+
     if (date) {
-      const start = new Date(date);
-      start.setHours(0, 0, 0, 0);
-      const end = new Date(date);
-      end.setHours(23, 59, 59, 999);
+      const start = parseDateISTStart(date);
+      const end = parseDateISTEnd(date);
       query.date = { $gte: start, $lte: end };
-    }
-    // Date range filter (using "date" field)
-    else if (fromDate && toDate) {
-      const start = new Date(fromDate);
-      start.setHours(0, 0, 0, 0);
-      const end = new Date(toDate);
-      end.setHours(23, 59, 59, 999);
+    } else if (fromDate && toDate) {
+      const start = parseDateISTStart(fromDate);
+      const end = parseDateISTEnd(toDate);
       query.date = { $gte: start, $lte: end };
     }
 
-    // Sort primarily by date, secondarily by createdAt
-    const entries = await Entry.find(query).sort({ date: -1, createdAt: -1 });
-    // console.log('entries===========', entries) 
-    // If loggedInUser exists → adjust rates
-    if (loggedInUser && entries.length > 0) {
-      // Get unique draws
-      const uniqueDraws = [...new Set(entries.map(e => e.timeLabel))];
+    // 🗄 DB call (newest first)
+    const entries = await Entry.find(query)
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit));
 
-      // Fetch rate masters for this user
-      const rateMastersByDraw = {};
-      for (const draw of uniqueDraws) {
-        let rateMasterQuery = { user: loggedInUser, draw };
-        if (draw === "LSK 3 PM") {
-          rateMasterQuery.draw = "KERALA 3 PM"; // your special case
-        }
-
-        const rateMaster = await RateMaster.findOne(rateMasterQuery);
-        const rateLookup = {};
-        (rateMaster?.rates || []).forEach(r => {
-          rateLookup[r.label] = Number(r.rate) || 10;
-        });
-        rateMastersByDraw[draw] = rateLookup;
-      }
-
-      // Apply rates to entries
-      const extractBetType = (typeStr) => {
-        if (!typeStr) return "SUPER";
-        if (typeStr.toUpperCase().includes("SUPER")) return "SUPER";
-        if (typeStr.toUpperCase().includes("BOX")) return "BOX";
-        if (typeStr.toUpperCase().includes("AB")) return "AB";
-        if (typeStr.toUpperCase().includes("BC")) return "BC";
-        if (typeStr.toUpperCase().includes("AC")) return "AC";
-        if (typeStr.includes("-A") || typeStr.endsWith("A")) return "A";
-        if (typeStr.includes("-B") || typeStr.endsWith("B")) return "B";
-        if (typeStr.includes("-C") || typeStr.endsWith("C")) return "C";
-        return typeStr.split("-").pop();
+    const mappedEntries = entries.map(e => {
+      const obj = e.toObject ? e.toObject() : e;
+      return {
+        ...obj,
+        number: obj.number || obj.num || obj.betNumber || "",
+        type: extractBaseType(obj.type)
       };
+    });
 
-      entries.forEach(e => {
-        const betType = extractBetType(e.type);
-        const rateLookup = rateMastersByDraw[e.timeLabel] || {};
-        const rate = rateLookup[betType] ?? 10; // fallback default
-        e.rate = rate * (Number(e.count) || 0);
+    const response = {
+      data: mappedEntries,
+      lastTimestamp: entries.length > 0 ? entries[entries.length - 1].createdAt : after || null
+    };
+
+    // 💾 Cache only initial load
+    if (useCache) {
+      entriesCache.set(cacheKey, {
+        data: response,
+        expiry: Date.now() + ENTRIES_TTL
       });
     }
-    res.status(200).json(entries);
+
+    res.status(200).json(response);
   } catch (error) {
     console.error("[GET ENTRIES ERROR]", error);
     res.status(500).json({ message: "Failed to fetch entries" });
   }
 };
+
+
+
+
+
+
+
 const getEntriesWithTimeBlock = async (req, res) => {
   try {
     const {
@@ -695,7 +1225,16 @@ const getEntriesWithTimeBlock = async (req, res) => {
 
     if (createdBy) query.createdBy = createdBy;
     if (timeCode) query.timeCode = timeCode;
-    if (timeLabel) query.timeLabel = timeLabel;
+
+    if (timeLabel && timeLabel.toLowerCase() !== "all") {
+      const normalized = summaryLabelMap[timeLabel.trim()] || timeLabel.trim().toUpperCase();
+      if (normalized === "KERALA 3 PM") {
+        query.timeLabel = { $in: ["KERALA 3 PM", "LSK 3 PM"] };
+      } else {
+        query.timeLabel = timeLabel;
+      }
+    }
+
     if (number) query.number = number;
     if (count) query.count = parseInt(count);
     if (billNo) query.billNo = billNo;
@@ -720,46 +1259,41 @@ const getEntriesWithTimeBlock = async (req, res) => {
     // Sort primarily by date, secondarily by createdAt
     const entries = await Entry.find(query).sort({ date: -1, createdAt: -1 });
     // console.log('entries===========', entries)
-    // If loggedInUser exists → adjust rates
+    // 🔁 Rate calculation based on viewer's (loggedInUser) Perspective
     if (loggedInUser && entries.length > 0) {
-      // Get unique draws
-      const uniqueDraws = [...new Set(entries.map(e => e.timeLabel))];
+      const uniqueDraws = [...new Set(entries.map(e => (e.timeLabel || "").trim().toUpperCase()))];
+      const rateMastersByDrawKey = {};
 
-      // Fetch rate masters for this user
-      const rateMastersByDraw = {};
       for (const draw of uniqueDraws) {
-        let rateMasterQuery = { user: loggedInUser, draw };
-        if (draw === "LSK 3 PM") {
-          rateMasterQuery.draw = "KERALA 3 PM"; // your special case
-        }
+        const rmDraw = summaryLabelMap[draw] || draw;
+        const rateMaster = await RateMaster.findOne({
+          user: { $regex: new RegExp(`^${loggedInUser}$`, 'i') },
+          draw: rmDraw
+        });
 
-        const rateMaster = await RateMaster.findOne(rateMasterQuery);
         const rateLookup = {};
         (rateMaster?.rates || []).forEach(r => {
-          rateLookup[r.label] = Number(r.rate) || 10;
+          const key = (r.label || r.name || "").toUpperCase();
+          if (key) rateLookup[key] = Number(r.rate) || getRateForType(key);
         });
-        rateMastersByDraw[draw] = rateLookup;
+        rateMastersByDrawKey[draw] = rateLookup;
       }
 
-      // Apply rates to entries
-      const extractBetType = (typeStr) => {
-        if (!typeStr) return "SUPER";
-        if (typeStr.toUpperCase().includes("SUPER")) return "SUPER";
-        if (typeStr.toUpperCase().includes("BOX")) return "BOX";
-        if (typeStr.toUpperCase().includes("AB")) return "AB";
-        if (typeStr.toUpperCase().includes("BC")) return "BC";
-        if (typeStr.toUpperCase().includes("AC")) return "AC";
-        if (typeStr.includes("-A") || typeStr.endsWith("A")) return "A";
-        if (typeStr.includes("-B") || typeStr.endsWith("B")) return "B";
-        if (typeStr.includes("-C") || typeStr.endsWith("C")) return "C";
-        return typeStr.split("-").pop();
-      };
-
       entries.forEach(e => {
-        const betType = extractBetType(e.type);
-        const rateLookup = rateMastersByDraw[e.timeLabel] || {};
-        const rate = rateLookup[betType] ?? 10; // fallback default
-        e.rate = rate * (Number(e.count) || 0);
+        const obj = e.toObject ? e.toObject() : e;
+        const drawKey = (obj.timeLabel || "").trim().toUpperCase();
+        const rateLookup = rateMastersByDrawKey[drawKey] || {};
+        const betType = extractBaseType(obj.type);
+        const rate = rateLookup[betType] ?? getRateForType(betType);
+
+        // Overwrite e.rate with the viewer's perspective (rate * count)
+        const entryCount = Number(obj.count) || 0;
+        e.rate = (rate * entryCount).toFixed(2);
+
+        // Ensure frontend fields match getSalesReport
+        e.number = obj.number || obj.num || obj.betNumber || "";
+        e.num = e.number;
+        e.type = betType;
       });
     }
     let updatedEntries = entries
@@ -806,8 +1340,19 @@ const invalidateEntry = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const updated = await Entry.findByIdAndUpdate(
-      id,
+    const query = { _id: id, isValid: { $ne: false } };
+
+    const obj = await Entry.findById(id);
+    if (!obj) return res.status(404).json({ message: 'Entry not found' });
+
+    // 🛡️ Security Check: Ensure user matches or is admin or ancestor
+    const ancestorsOfCreator = await getAncestors(obj.createdBy);
+    if (req.user.userType !== 'admin' && !ancestorsOfCreator.includes(req.user.username)) {
+      return res.status(403).json({ message: 'Access denied: You can only invalidate your own or your descendants entries' });
+    }
+
+    const updated = await Entry.findOneAndUpdate(
+      query,
       { isValid: false },
       { new: true }
     );
@@ -815,6 +1360,28 @@ const invalidateEntry = async (req, res) => {
     if (!updated) {
       return res.status(404).json({ message: 'Entry not found' });
     }
+
+    // 🟢 Update SalesReportSummary incrementally (decrement for invalid entry)
+    const oldCount = Number(updated.count) || 0;
+    const oldRate = Number(updated.rate || (updated.number.length === 1 ? 12 : 10) * oldCount);
+    const countDelta = -oldCount;
+    const amountDelta = -oldRate;
+    const scheme = extractBaseType(updated.type);
+    const dateStr = formatDateIST(new Date(updated.date)); // 🔑 Use draw date
+
+    await updateSummaryDelta(updated.createdBy, dateStr, updated.timeLabel, scheme, countDelta, amountDelta);
+
+    // 🟢 Clear caches to ensure immediate update in reports
+    entriesCache.clear();
+    reportCache.clear();
+
+    // 🟢 Sync Winning Summary
+    const updateDateStr = updated.date instanceof Date ? updated.date.toISOString().split('T')[0] : updated.date;
+    await saveWinningSummaryInternal({
+      date: updateDateStr,
+      timeLabel: updated.timeLabel,
+      agent: updated.createdBy
+    });
 
     res.status(200).json({ message: 'Marked as invalid' });
   } catch (err) {
@@ -828,11 +1395,19 @@ const deleteEntryById = async (req, res) => {
     const { id, userType } = req.params;
 
     const obj = await Entry.findById(id);
-    // console.log('obj=========', obj)
+    if (!obj) {
+      return res.status(404).json({ message: 'Entry not found' });
+    }
+
+    // 🛡️ Security Check: Ensure user matches or is admin or ancestor
+    const ancestorsOfCreator = await getAncestors(obj.createdBy);
+    if (req.user.userType !== 'admin' && !ancestorsOfCreator.includes(req.user.username)) {
+      return res.status(403).json({ message: 'Access denied: You can only delete your own or your descendants entries' });
+    }
+
     const usertype = userType;
     const timeLabel = obj.timeLabel;
     const blockTimeData = await getBlockTimeF(timeLabel, usertype);
-    // console.log('blockTimeData==========', blockTimeData)
     if (!blockTimeData || !blockTimeData.blockTime) {
       return res.status(400).json({ message: 'Block time not found' });
     }
@@ -847,11 +1422,35 @@ const deleteEntryById = async (req, res) => {
     if (now >= block) {
       return res.status(400).json({ message: 'Cannot delete entry, Entry time is blocked for this draw' });
     }
+
+    const oldCount = Number(obj.count) || 0;
+    const oldRate = Number(obj.rate || (obj.number.length === 1 ? 12 : 10) * oldCount);
+    const countDelta = -oldCount;
+    const amountDelta = -oldRate;
+    const scheme = extractBaseType(obj.type);
+
+    // 🟢 Refund limits
+    await adjustEntryLimits(obj, countDelta);
+
+    if (obj.isValid !== false) {
+      // 🟢 Update SalesReportSummary incrementally (before deletion)
+      const dateStr = formatDateIST(new Date(obj.date)); 
+      await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
+    }
+
     const deletedEntry = await Entry.findByIdAndDelete(id);
 
-    if (!deletedEntry) {
-      return res.status(404).json({ message: 'Entry not found' });
-    }
+    // 🟢 Clear caches to ensure immediate update in reports
+    entriesCache.clear();
+    reportCache.clear();
+
+    // 🟢 Sync Winning Summary
+    const objDateStr = obj.date instanceof Date ? obj.date.toISOString().split('T')[0] : obj.date;
+    await saveWinningSummaryInternal({
+      date: objDateStr,
+      timeLabel: obj.timeLabel,
+      agent: obj.createdBy
+    });
 
     res.status(200).json({ message: 'Entry deleted successfully' });
   } catch (err) {
@@ -866,9 +1465,48 @@ const deleteEntriesByBillNo = async (req, res) => {
   try {
     const { billNo } = req.params;
 
-    const result = await Entry.deleteMany({ billNo });
-    if (result.deletedCount === 0) {
+    const entriesToDelete = await Entry.find({ billNo });
+    if (entriesToDelete.length === 0) {
       return res.status(404).json({ message: 'No entries found with this bill number' });
+    }
+    // 🛡️ Security Check: Ensure user matches or is admin or ancestor
+    const ancestorsOfCreator = await getAncestors(entriesToDelete[0].createdBy);
+    if (req.user.userType !== 'admin' && !ancestorsOfCreator.includes(req.user.username)) {
+      return res.status(403).json({ message: 'Access denied: You can only delete your own or your descendants entries' });
+    }
+    // 🟢 Update SalesReportSummary incrementally for each entry before deletion
+    for (const obj of entriesToDelete) {
+      if (obj.isValid === false) continue; // 🛡️ ALREADY SUBTRACTED (SKIP TO AVOID NEGATIVE VALUES)
+
+      const oldCount = Number(obj.count) || 0;
+      const oldRate = Number(obj.rate || (obj.number.length === 1 ? 12 : 10) * oldCount);
+
+      const countDelta = -oldCount;
+      const amountDelta = -oldRate;
+      const scheme = extractBaseType(obj.type);
+      const dateStr = formatDateIST(new Date(obj.date)); // 🔑 Use draw date (consistent with addEntries)
+
+      await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
+
+      // 🟢 Refund limits
+      await adjustEntryLimits(obj, -oldCount);
+    }
+
+    await Entry.deleteMany({ billNo });
+
+    // 🟢 Clear caches to ensure immediate update in reports
+    entriesCache.clear();
+    reportCache.clear();
+
+    // 🟢 Sync Winning Summary for the bills deleted
+    if (entriesToDelete.length > 0) {
+      const firstEntry = entriesToDelete[0];
+      const billDateStr = firstEntry.date instanceof Date ? firstEntry.date.toISOString().split('T')[0] : firstEntry.date;
+      await saveWinningSummaryInternal({
+        date: billDateStr,
+        timeLabel: firstEntry.timeLabel,
+        agent: firstEntry.createdBy
+      });
     }
 
     res.status(200).json({ message: 'Entries deleted successfully' });
@@ -929,10 +1567,10 @@ const getResult = async (req, res) => {
       return res.status(400).json({ message: 'Missing date parameter' });
     }
 
-    let query = { time, date };
+    const searchLabels = getSearchLabels(time);
+    let query = { time: { $in: searchLabels }, date };
 
     // Find all matching result documents
-
     const resultDocs = await Result.find(query).lean();
     const resultDoc = await Result.find({}).lean();
     // console.log('resultDoc=>>>>>>>>>>>>>>>>', resultDoc)
@@ -1003,7 +1641,7 @@ const createUser = async (req, res) => {
       name,
       username,
       password: hashedPassword,
-      nonHashedPassword: password,
+      // nonHashedPassword: password, // ❌ REMOVED SECURITY RISK
       scheme,
       createdBy,
       usertype, // ✅ added usertype to the document
@@ -1017,7 +1655,7 @@ const createUser = async (req, res) => {
         id: newUser._id,
         name: newUser.name,
         username: newUser.username,
-        nonHashedPassword: newUser.nonHashedPassword,
+        // nonHashedPassword: newUser.nonHashedPassword, // ❌ REMOVED SECURITY RISK
         scheme: newUser.scheme,
         createdBy: newUser.createdBy,
         usertype: newUser.usertype, // ✅ include in response
@@ -1030,7 +1668,60 @@ const createUser = async (req, res) => {
 };
 
 
+// const saveResult = async (req, res) => {
+//   try {
+//     const { results } = req.body;
+
+//     const [date] = Object.keys(results);
+//     const [timeData] = results[date];
+//     const [time] = Object.keys(timeData);
+
+//     const { prizes, entries } = timeData[time];
+
+//     // ✅ Replace old result if same date & time exists
+//     const updatedResult = await Result.findOneAndUpdate(
+//       { date, time }, // search by date + time
+//       { prizes, entries }, // fields to update
+//       { upsert: true, new: true } // create if not exists, return updated
+//     );
+
+//     const agents = await Entry.distinct("createdBy", {
+//       timeLabel: time,
+//       createdAt: {
+//         $gte: parseDateISTStart(date),
+//         $lte: parseDateISTEnd(date)
+//       }
+//     });
+
+//     for (const agent of agents) {
+//       await saveWinningSummaryInternal({
+//         date,
+//         timeLabel: time,
+//         agent
+//       });
+//     }
+
+//     return res.status(200).json({
+//       message: "Result & winning summary saved successfully",
+//       result: updatedResult
+//     });
+
+
+//   } catch (err) {
+//     console.error('❌ Error saving result:', err);
+//     res.status(500).json({
+//       message: 'Error saving result',
+//       error: err.message
+//     });
+//   }
+// };
+
+
+
+// ✅ Add Entries
+
 const saveResult = async (req, res) => {
+  console.log("🔥 saveResult ROUTE HIT");
   try {
     const { results } = req.body;
 
@@ -1040,29 +1731,45 @@ const saveResult = async (req, res) => {
 
     const { prizes, entries } = timeData[time];
 
-    // ✅ Replace old result if same date & time exists
+    // ✅ Save / update result
     const updatedResult = await Result.findOneAndUpdate(
-      { date, time }, // search by date + time
-      { prizes, entries }, // fields to update
-      { upsert: true, new: true } // create if not exists, return updated
+      { date, time },
+      { prizes, entries },
+      { upsert: true, new: true }
     );
+    const searchLabels = getSearchLabels(time);
 
-    res.status(200).json({
-      message: 'Result saved successfully',
+    const agents = await Entry.distinct("createdBy", {
+      timeLabel: { $in: searchLabels },
+      date: {
+        $gte: parseDateISTStart(date),
+        $lte: parseDateISTEnd(date)
+      }
+    });
+
+    console.log("🧠 Agents found for results on", date, time, "(search:", searchLabels, "):", agents);
+    for (const agent of agents) {
+      console.log("💾 Saving winning summary for:", agent);
+      await saveWinningSummaryInternal({
+        date,
+        timeLabel: time,
+        agent
+      });
+    }
+
+    return res.status(200).json({
+      message: "Result & winning summary saved successfully",
       result: updatedResult
     });
+
   } catch (err) {
-    console.error('❌ Error saving result:', err);
+    console.error("❌ Error saving result:", err);
     res.status(500).json({
-      message: 'Error saving result',
+      message: "Error saving result",
       error: err.message
     });
   }
 };
-
-
-
-// ✅ Add Entries
 
 const addEntries = async (req, res) => {
   try {
@@ -1071,25 +1778,133 @@ const addEntries = async (req, res) => {
     if (!entries || entries.length === 0) {
       return res.status(400).json({ message: 'No entries provided' });
     }
+
+    // 🛡️ Hierarchical Sales Block Check (Prevents and blocks descendants from placing bets if ancestor is sales-blocked)
+    const activeSellerForBlock = normalizeName(req.body.selectedAgent) || normalizeName(createdBy);
+    if (await isUserOrAncestorSalesBlocked(activeSellerForBlock)) {
+      return res.status(403).json({ message: 'Sales are blocked for this user or their master.' });
+    }
     if (!date) {
       return res.status(400).json({ message: 'Date is required' });
     }
 
     const billNo = await getNextBillNumber();
 
+    const normCreatedBy = normalizeName(createdBy);
+    // Use selectedAgent if provided (e.g. Admin or Master entering for a sub-agent)
+    const activeSeller = normalizeName(req.body.selectedAgent) || normCreatedBy;
+
+    // 🛡️ Block Time logic
+    const activeUser = await MainUser.findOne({
+      username: { $regex: new RegExp(`^${createdBy}$`, "i") }
+    }).lean();
+    const usertype = activeUser?.usertype || 'sub';
+    const blockTimeData = await getBlockTimeF(timeLabel, usertype);
+
+    let targetDateStr = date;
+    if (blockTimeData) {
+      const { blockTime, unblockTime } = blockTimeData;
+      if (blockTime && unblockTime) {
+        const now = new Date();
+        const [bh, bm] = blockTime.split(':').map(Number);
+        const [uh, um] = unblockTime.split(':').map(Number);
+        const block = new Date(now.getFullYear(), now.getMonth(), now.getDate(), bh, bm);
+        const unblock = new Date(now.getFullYear(), now.getMonth(), now.getDate(), uh, um);
+
+        if (now >= block && now < unblock) {
+          return res.status(403).json({ message: 'Entry time is blocked for this draw' });
+        }
+        if (now >= unblock) {
+          const tomorrow = new Date(now);
+          tomorrow.setDate(tomorrow.getDate() + 1);
+          targetDateStr = formatDateIST(tomorrow);
+        }
+      }
+    }
+
     const toSave = entries.map(e => ({
       ...e,
       rate: e.rate || Number(e?.total || (e.number.length === 1 ? 12 : 10) * e.count).toFixed(2),
       timeLabel,
       timeCode,
-      createdBy,
+      createdBy: activeSeller,
       billNo,
       toggleCount,
       createdAt: new Date(),
-      date: new Date(date),
+      date: new Date(targetDateStr),
     }));
 
+    /* CUMULATIVE CREDIT LIMIT ENFORCEMENT */
+    const lookupLabel = normalizeDrawLabel(timeLabel);
+    const ancestors = await getAncestors(createdBy);
+    console.log(`[DEBUG] Ancestors for ${createdBy}:`, ancestors);
+
+    for (const ancestorName of ancestors) {
+      // ✅ Case-insensitive lookup for credit limit
+      const limitDoc = await UserAmount.findOne({
+        toUser: { $regex: new RegExp(`^${ancestorName}$`, 'i') },
+        $or: [{ drawTime: lookupLabel }, { drawTime: "ALL" }]
+      }).sort({ drawTime: -1 });
+
+      if (limitDoc) {
+        const limit = limitDoc.amount;
+        console.log(`[DEBUG] Found LimitDoc for ${ancestorName}:`, limit);
+
+        // Calculate cumulative sales for this ancestor and all their descendants
+        const descendants = await getAllDescendantsFlat(ancestorName);
+        const relatedUsers = [ancestorName, ...descendants];
+        console.log(`[DEBUG] Related users for ${ancestorName}:`, relatedUsers);
+
+        const startOfDay = parseDateISTStart(date);
+        const endOfDay = parseDateISTEnd(date);
+
+        const labelsToCheck = [timeLabel];
+        if (timeLabel === "LSK 3 PM") labelsToCheck.push("KERALA 3 PM");
+        if (timeLabel === "KERALA 3 PM") labelsToCheck.push("LSK 3 PM");
+
+        const existingEntries = await Entry.find({
+          createdBy: { $in: relatedUsers },
+          date: { $gte: startOfDay, $lte: endOfDay },
+          timeLabel: { $in: labelsToCheck },
+          isValid: { $ne: false }
+        });
+
+        const totalAlreadySold = existingEntries.reduce((sum, e) => sum + (Number(e.rate) || 0), 0);
+        const currentBatchTotal = toSave.reduce((sum, e) => sum + Number(e.rate), 0);
+        console.log(`[DEBUG] ${ancestorName} cumulative: alreadySold=${totalAlreadySold}, currentBatch=${currentBatchTotal}, limit=${limit}`);
+
+        if (totalAlreadySold + currentBatchTotal > limit) {
+          const isSelf = ancestorName.toLowerCase() === createdBy.toLowerCase();
+          const errorMsg = isSelf
+            ? `Credit limit exceeded for ${timeLabel}.`
+            : `Cumulative credit limit for ${ancestorName} exceeded for ${timeLabel}.`;
+
+          console.log(`[DEBUG] LIMIT EXCEEDED for ${ancestorName}`);
+          return res.status(400).json({
+            message: errorMsg,
+            details: {
+              ancestor: ancestorName,
+              limit,
+              alreadySold: totalAlreadySold.toFixed(2),
+              currentAttempt: currentBatchTotal.toFixed(2),
+              shortfall: (totalAlreadySold + currentBatchTotal - limit).toFixed(2)
+            }
+          });
+        }
+      } else {
+        console.log(`[DEBUG] No LimitDoc found for ancestor: ${ancestorName} (Draw: ${lookupLabel})`);
+      }
+    }
+
     await Entry.insertMany(toSave);
+
+    // 🟢 Update SalesReportSummary automatically (using targetDateStr)
+    await updateAutomaticSummary(createdBy, targetDateStr, timeLabel, timeCode, toSave);
+
+    // 🟢 Clear caches to ensure immediate update in reports
+    entriesCache.clear();
+    reportCache.clear();
+
     res.status(200).json({ message: 'Entries saved successfully', billNo });
   } catch (error) {
     console.error('[SAVE ENTRY ERROR]', error);
@@ -1100,7 +1915,7 @@ const addEntries = async (req, res) => {
 
 
 
-// ✅ Get Result (by date and time)
+// Get Result (by date and time)
 // controller/rateMasterController.js
 const saveRateMaster = async (req, res) => {
   try {
@@ -1120,7 +1935,7 @@ const saveRateMaster = async (req, res) => {
       }
     }
 
-    // ✅ Update existing document OR create new if not exists
+    // Update existing document OR create new if not exists
     const updatedRate = await RateMaster.findOneAndUpdate(
       { user, draw },                     // match user + draw
       { $set: { rates } },                // update rates only
@@ -1128,7 +1943,7 @@ const saveRateMaster = async (req, res) => {
     );
 
     res.status(200).json({
-      message: "✅ Rate master saved/updated successfully",
+      message: "Rate master saved/updated successfully",
       data: updatedRate,
       status: 200,
     });
@@ -1147,9 +1962,20 @@ const getRateMaster = async (req, res) => {
       return res.status(400).json({ message: 'User and draw are required' });
     }
     let RateMasterQuery = {}
-    if (user) {
+    
+    // 🛡️ Security Check: Enforce hierarchical filter if not admin
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      const targetUser = user || req.user.username;
+      if (!allowed.includes(targetUser)) {
+        return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      RateMasterQuery.user = targetUser;
+    } else if (user) {
       RateMasterQuery.user = user
     }
+
     if (draw) {
       RateMasterQuery.draw = draw
     } if (draw === "LSK 3 PM") {
@@ -1179,11 +2005,17 @@ const updateEntryCount = async (req, res) => {
 
     if (!count || isNaN(count)) return res.status(400).json({ message: 'Invalid count' });
     const obj = await Entry.findById(id);
-    // console.log('obj=========', obj)
+    if (!obj) return res.status(404).json({ message: 'Entry not found' });
+
+    // 🛡️ Security Check: Ensure user matches or is admin or ancestor
+    const ancestorsOfCreator = await getAncestors(obj.createdBy);
+    if (req.user.userType !== 'admin' && !ancestorsOfCreator.includes(req.user.username)) {
+      return res.status(403).json({ message: 'Access denied: You can only update your own or your descendants entries' });
+    }
+
     const usertype = userType;
     const timeLabel = obj.timeLabel;
     const blockTimeData = await getBlockTimeF(timeLabel, usertype);
-    // console.log('blockTimeData==========', blockTimeData)
     if (!blockTimeData || !blockTimeData.blockTime) {
       return res.status(400).json({ message: 'Block time not found' });
     }
@@ -1198,8 +2030,29 @@ const updateEntryCount = async (req, res) => {
     if (now >= block) {
       return res.status(400).json({ message: 'Cannot update count, Entry time is blocked for this draw' });
     }
-    const updated = await Entry.findByIdAndUpdate(id, { count: parseInt(count) }, { new: true });
-    if (!updated) return res.status(404).json({ message: 'Entry not found' });
+
+    const oldCount = Number(obj.count) || 1;
+    const oldRate = Number(obj.rate || (obj.number.length === 1 ? 12 : 10) * oldCount);
+    const unitRate = oldRate / oldCount;
+    const newCount = parseInt(count);
+    const newRate = Number((newCount * unitRate).toFixed(2));
+
+    const updated = await Entry.findByIdAndUpdate(id, { count: newCount, rate: newRate }, { new: true });
+
+    // 🟢 Update SalesReportSummary incrementally
+    const countDelta = newCount - oldCount;
+    const amountDelta = newRate - oldRate;
+    const scheme = extractBaseType(obj.type);
+    const dateStr = formatDateIST(new Date(obj.date)); // 🔑 Use draw date
+
+    await updateSummaryDelta(obj.createdBy, dateStr, obj.timeLabel, scheme, countDelta, amountDelta);
+
+    // 🟢 Adjust limits
+    await adjustEntryLimits(obj, countDelta);
+
+    // 🟢 Clear caches to ensure immediate update in reports
+    entriesCache.clear();
+    reportCache.clear();
 
     res.status(200).json({ message: 'Count updated successfully', entry: updated });
   } catch (err) {
@@ -1210,7 +2063,7 @@ const updateEntryCount = async (req, res) => {
 
 
 
-// ✅ New: Get total count grouped by number
+//   New: Get total count grouped by number
 const getCountReport = async (req, res) => {
   try {
     const { date, time, agent, group, number } = req.query;
@@ -1223,7 +2076,16 @@ const getCountReport = async (req, res) => {
       query.createdAt = { $gte: start, $lte: end };
     }
 
-    if (agent) {
+    // 🛡️ Security Check: Enforce hierarchical filter if not admin
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      const targetUser = agent || req.user.username;
+      if (!allowed.includes(targetUser)) {
+        return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      query.createdBy = targetUser;
+    } else if (agent) {
       query.createdBy = agent;
     }
 
@@ -1238,7 +2100,7 @@ const getCountReport = async (req, res) => {
     const countMap = {};
 
     entries.forEach(entry => {
-      let ticket = extractBetType(entry.type)
+      let ticket = extractBaseType(entry.type)
       const key = group === 'true'
         ? entry.number // Group only by number
         : `${entry.number}_${ticket}`; // Group by number + ticket name
@@ -1267,16 +2129,56 @@ const getCountReport = async (req, res) => {
 
 
 
-// ✅ Get All Users (optionally filter by createdBy)
+//   Get All Users (optionally filter by createdBy)
 const getAllUsers = async (req, res) => {
   try {
     const { createdBy } = req.query;
-    const query = createdBy ? { createdBy } : {};
+    let query = {};
 
-    const users = await MainUser.find(query).select('-password -nonHashedPassword');
+    // 🛡️ Security Check: If not admin, restrict to descendants only
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowedUsernames = [req.user.username, ...descendants];
+      
+      if (createdBy) {
+        // If they requested a specific target, ensure it's in their tree
+        if (!allowedUsernames.includes(createdBy)) {
+          return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+        }
+        query = { username: createdBy };
+      } else {
+        query = { username: { $in: allowedUsernames } };
+      }
+    } else {
+      query = createdBy ? { createdBy } : {};
+    }
 
-    // const userss = await MainUser.find(query);
-    res.status(200).json(users);
+    // Use .lean() for better performance when we need to modify the objects
+    const users = await MainUser.find(query).select('-password').lean();
+
+    // Fetch all users to build the parent map for hierarchy calculation
+    const allUsers = await MainUser.find().select('username createdBy').lean();
+    const parentMap = {};
+    allUsers.forEach(u => {
+      if (u.username) {
+        parentMap[u.username.toLowerCase()] = u.createdBy;
+      }
+    });
+
+    const usersWithHierarchy = users.map(user => {
+      const partner = user.createdBy || '-';
+      const stockist = (partner !== '-' && parentMap[partner.toLowerCase()]) || '-';
+      const subStockist = (stockist !== '-' && parentMap[stockist.toLowerCase()]) || '-';
+
+      return {
+        ...user,
+        partner,
+        stockist,
+        subStockist,
+      };
+    });
+
+    res.status(200).json(usersWithHierarchy);
   } catch (error) {
     console.error('[GET USERS ERROR]', error);
     res.status(500).json({ message: 'Failed to fetch users' });
@@ -1289,12 +2191,32 @@ const getusersByid = async (req, res) => {
       return res.status(400).json({ message: 'User _id is required' });
     }
 
-    const user = await MainUser.findById(id).select('');
+    const user = await MainUser.findById(id).select('-password').lean();
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    res.status(200).json(user);
+    // Fetch all users to build the parent map for hierarchy calculation
+    const allUsers = await MainUser.find().select('username createdBy').lean();
+    const parentMap = {};
+    allUsers.forEach(u => {
+      if (u.username) {
+        parentMap[u.username.toLowerCase()] = u.createdBy;
+      }
+    });
+
+    const partner = user.createdBy || '-';
+    const stockist = (partner !== '-' && parentMap[partner.toLowerCase()]) || '-';
+    const subStockist = (stockist !== '-' && parentMap[stockist.toLowerCase()]) || '-';
+
+    const userWithHierarchy = {
+      ...user,
+      partner,
+      stockist,
+      subStockist,
+    };
+
+    res.status(200).json(userWithHierarchy);
   } catch (error) {
     console.error('[GET USER BY ID ERROR]', error);
     res.status(500).json({ message: 'Failed to fetch user' });
@@ -1312,60 +2234,8 @@ const payouts = {
   A_B_C: 100,
 };
 
-// Helper function to calculate win amount
-const calculateWinAmount = (entry, results) => {
-  if (!results || !results["1"]) return 0;
+// Helper functions moved to winningUtils.js
 
-  const firstPrize = results["1"];
-  const others = Array.isArray(results.others) ? results.others : [];
-  const allPrizes = [
-    results["1"],
-    results["2"],
-    results["3"],
-    results["4"],
-    results["5"],
-    ...others,
-  ].filter(Boolean);
-
-  const num = entry.number;
-  const count = entry.count || 0;
-  const baseType = extractBetType(entry.type);
-
-  let winAmount = 0;
-
-  if (baseType === "SUPER") {
-    const prizePos = allPrizes.indexOf(num) + 1;
-    if (prizePos > 0) {
-      winAmount = (payouts.SUPER[prizePos] || payouts.SUPER.other) * count;
-    }
-  } else if (baseType === "BOX") {
-    if (num === firstPrize) {
-      winAmount = isDoubleNumber(firstPrize)
-        ? payouts.BOX.double.perfect * count
-        : payouts.BOX.normal.perfect * count;
-    } else if (
-      num.split("").sort().join("") === firstPrize.split("").sort().join("")
-    ) {
-      winAmount = isDoubleNumber(firstPrize)
-        ? payouts.BOX.double.permutation * count
-        : payouts.BOX.normal.permutation * count;
-    }
-  } else if (baseType === "AB" && num === firstPrize.slice(0, 2)) {
-    winAmount = payouts.AB_BC_AC * count;
-  } else if (baseType === "BC" && num === firstPrize.slice(1, 3)) {
-    winAmount = payouts.AB_BC_AC * count;
-  } else if (baseType === "AC" && num === firstPrize[0] + firstPrize[2]) {
-    winAmount = payouts.AB_BC_AC * count;
-  } else if (baseType === "A" && num === firstPrize[0]) {
-    winAmount = payouts.A_B_C * count;
-  } else if (baseType === "B" && num === firstPrize[1]) {
-    winAmount = payouts.A_B_C * count;
-  } else if (baseType === "C" && num === firstPrize[2]) {
-    winAmount = payouts.A_B_C * count;
-  }
-
-  return winAmount;
-};
 
 // Pseudocode based on your frontend logic
 const drawLabelMap = {
@@ -1379,7 +2249,19 @@ function normalizeDrawLabel(label) {
   return drawLabelMap[label] || label;
 }
 const netPayMultiday = async (req, res) => {
-  const { fromDate, toDate, time, agent, fromAccountSummary, loggedInUser } = req.body;
+  let { fromDate, toDate, time, agent, fromAccountSummary, loggedInUser } = req.body;
+
+  // 🛡️ Security Check: Enforce hierarchical filter if not admin
+  if (req.user.userType !== 'admin') {
+    const descendants = await getAllDescendantsFlat(req.user.username);
+    const allowed = [req.user.username, ...descendants];
+    const targetUser = agent || loggedInUser || req.user.username;
+    if (!allowed.includes(targetUser)) {
+        return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+    }
+    loggedInUser = req.user.username;
+    agent = targetUser;
+  }
   // console.log('req.body=>>>>>>>>>>>>>>>>', req.body);
 
   try {
@@ -1409,7 +2291,8 @@ const netPayMultiday = async (req, res) => {
 
     let entryQuery = {
       createdBy: { $in: agentUsers },
-      date: { $gte: start, $lte: end }
+      date: { $gte: start, $lte: end },
+      isValid: true
     };
 
     if (!isAllTime) {
@@ -1448,8 +2331,8 @@ const netPayMultiday = async (req, res) => {
 
     const stripSpaceBeforeMeridiem = (label) => label.replace(/\s+(PM|AM)$/gi, '$1');
 
-    let resultQuery = { date: { $gte: fromDate, $lte: toDate } };
-
+    const datesList = getDatesBetween(start, end).map(d => formatDateIST(d));
+    let resultQuery = { date: { $in: datesList } };
     if (!isAllTime) {
       if (isArrayTime) {
         // Normalize draw labels to match how results are stored (e.g., LSK 3 PM -> KERALA 3PM)
@@ -1482,8 +2365,56 @@ const netPayMultiday = async (req, res) => {
       req.body.loggedInUser
     );
     // console.log('userRates=>>>>>>>>>>>>>>>>', userRates)
+    // Dynamic Scheme Resolution
+    const fromAccountSummary = !!req.body.fromAccountSummary;
+    const viewerName = loggedInUser || agent || "Admin";
+    const viewer = users.find(u => u.username === viewerName);
+    const viewerSchemeId = viewer?.scheme || "Scheme 1";
+
+    /**
+     * Cache for Schema data.
+     * Key: `drawName|schemeId`
+     */
+    const schemeCache = {};
+
+    /**
+     * Helper to pre-fetch scheme data into schemeCache.
+     */
+    const preFetchScheme = async (drawLabel, schemeId) => {
+      const cacheKey = `${drawLabel}|${schemeId}`;
+      if (schemeCache[cacheKey]) return;
+
+      const normalizedLabel = summaryLabelMap[drawLabel.toUpperCase()] || drawLabel;
+      const searchLabels = getSearchLabels(normalizedLabel);
+      const activeTabNum = parseInt(schemeId.replace(/[^0-9]/g, ""), 10) || 1;
+
+      const schemaDoc = await Schema.findOne(
+        { activeTab: activeTabNum, "draws.drawName": { $in: searchLabels } },
+        { draws: { $elemMatch: { drawName: { $in: searchLabels } } } }
+      ).lean();
+
+      if (schemaDoc && schemaDoc.draws && schemaDoc.draws[0]) {
+        schemeCache[cacheKey] = { schemes: schemaDoc.draws[0].schemes };
+      }
+    };
+
+    // Pre-fetch based on fromAccountSummary flag
+    if (fromAccountSummary) {
+      // Fetch creator's scheme for each unique (draw, scheme) pair
+      for (const entry of entries) {
+        const creatorScheme = userSchemeMap[entry.createdBy] || "Scheme 1";
+        await preFetchScheme(entry.timeLabel, creatorScheme);
+      }
+    } else {
+      // Use viewer's scheme for ALL entries
+      const uniqueEntryDraws = [...new Set(entries.map(e => e.timeLabel))];
+      for (const label of uniqueEntryDraws) {
+        await preFetchScheme(label, viewerSchemeId);
+      }
+    }
+
     const processedEntries = entries.map(entry => {
-      const entryDateStr = formatDateIST(new Date(entry.date));
+      const entryDateStr = formatDateIST(new Date(entry.date)); // Use entry.date (Draw Date)
       // Normalize entry draw label to align with result keys (e.g., LSK 3 PM -> KERALA 3PM)
       const normalizedLabel = stripSpaceBeforeMeridiem(normalizeDrawLabel(entry.timeLabel));
       const dayResult = resultByDateTime[`${entryDateStr}_${normalizedLabel}`] || null;
@@ -1506,27 +2437,49 @@ const netPayMultiday = async (req, res) => {
       // Normalize the draw label to match how it's stored in getUserRates
       const normalizedRateDrawLabel = stripSpaceBeforeMeridiem(normalizeDrawLabel(entry.timeLabel));
       // console.log('normalizedRateDrawLabel', normalizedRateDrawLabel)
-      const drawRateMap = (isAllTime || isArrayTime)
-        ? (userRateMap[normalizedRateDrawLabel] || {})
-        : (userRateMap[normalizedLabel] || userRateMap[time] || {});
+      const betType = extractBaseType(entry.type);
+      const count = Number(entry.count) || 0;
+      const drawRateMap = userRateMap[normalizedRateDrawLabel] || {};
+      const appliedRate = drawRateMap[betType] ?? 10;
+      const calculatedAmount = count * appliedRate;
 
-      const betType = extractBetType(entry.type);
-      // console.log('drawRateMap', drawRateMap)
-      // console.log('betType', betType)
-      const rate = drawRateMap[betType] ?? 10;
-      // console.log('rate', rate)
-      const winAmount = calculateWinAmount(entry, normalizedResult);
-      // console.log('winAmount', winAmount)
-      const winType = computeWinType(entry, normalizedResult);
-      // console.log('winType', winType)
+      // Use correct scheme ID for lookup
+      const effectiveSchemeId = fromAccountSummary
+        ? (userSchemeMap[entry.createdBy] || "Scheme 1")
+        : viewerSchemeId;
+
+      const targetDrawScheme = schemeCache[`${entry.timeLabel}|${effectiveSchemeId}`];
+
+      // Safety fallback prizes if viewer's scheme is missing them (e.g. AB/BC/AC are exactly 30)
+      const fallbackPrizes = {
+        "AB": 30, "BC": 30, "AC": 30,
+        "A": 0, "B": 0, "C": 0,
+        "SUPER 1": 400, "SUPER 2": 50, "SUPER 3": 20, "SUPER 4": 20, "SUPER 5": 20, "SUPER other": 10,
+        "BOX perfect": 300, "BOX permutation": 30
+      };
+
+      const wins = calculateWinAmountFull(entry, normalizedResult, targetDrawScheme, fallbackPrizes) || [];
+
+      let prize = 0;
+      let superPrize = 0;
+      let winTypesArr = [];
+
+      wins.forEach(w => {
+        prize += (w.prize || 0);
+        superPrize += (w.superPrize || 0);
+        if (w.winType) winTypesArr.push(w.winType);
+      });
+
+      const winType = winTypesArr.join(', ');
 
       return {
         ...entry.toObject(),
-        winAmount,
+        winAmount: prize,
+        superAmount: superPrize,
         winType,
         scheme: userSchemeMap[entry.createdBy] || "Scheme 1",
-        appliedRate: rate,
-        calculatedAmount: rate * (Number(entry.count) || 0),
+        appliedRate: Number(appliedRate.toFixed(2)),
+        calculatedAmount: calculatedAmount, // 🔄 Reverted to viewer-calculated rate
         date: entryDateStr
       };
     });
@@ -1719,38 +2672,11 @@ function isDoubleNumber(numStr) {
   return new Set(numStr.split("")).size === 2;
 }
 
-// function extractBetType(typeStr) {
+// function extractBaseType(typeStr) {
 //   if (!typeStr) return "";
 //   const parts = typeStr.split("-");
 //   return parts[parts.length - 1]; // Get the last part (SUPER, BOX, etc.)
 // }
-const extractBetType = (typeStr) => {
-  // console.log('typeStr', typeStr);
-  if (!typeStr) return "SUPER";
-
-  // Handle different patterns: LSK3SUPER, D-1-A, etc.
-  if (typeStr.toUpperCase().includes("SUPER")) {
-    return "SUPER";
-  } else if (typeStr.toUpperCase().includes("BOX")) {
-    return "BOX";
-  } else if (typeStr.toUpperCase().includes("AB")) {
-    return "AB";
-  } else if (typeStr.toUpperCase().includes("BC")) {
-    return "BC";
-  } else if (typeStr.toUpperCase().includes("AC")) {
-    return "AC";
-  } else if (typeStr.includes("-A") || typeStr.endsWith("A")) {
-    return "A";
-  } else if (typeStr.includes("-B") || typeStr.endsWith("B")) {
-    return "B";
-  } else if (typeStr.includes("-C") || typeStr.endsWith("C")) {
-    return "C";
-  }
-
-  // Fallback: extract from parts
-  const parts = typeStr.split("-");
-  return parts[parts.length - 1];
-};
 const extractBetTypeTime = (typeStr) => {
   // console.log('typeStr', typeStr);
   if (!typeStr) return "KERALA 3 PM";
@@ -1797,35 +2723,7 @@ function normalizeResultDocs(resultDocs) {
   return grouped;
 }
 
-function computeWinType(entry, results) {
-  if (!results) return "";
-  const baseType = extractBetType(entry.type);
-  const num = entry.number;
-  const first = results["1"];
-  const others = results.others || [];
-
-  if (baseType === "SUPER") {
-    if (num === results["1"]) return "SUPER 1";
-    if (num === results["2"]) return "SUPER 2";
-    if (num === results["3"]) return "SUPER 3";
-    if (num === results["4"]) return "SUPER 4";
-    if (num === results["5"]) return "SUPER 5";
-    if (others.includes(num)) return "SUPER other";
-    return "";
-  }
-
-  if (baseType === "BOX" && first) {
-    const isDouble = isDoubleNumber(first);
-    const isPerfect = num === first;
-    const isPerm = num.split("").sort().join("") === first.split("").sort().join("");
-    if (isPerfect) return isDouble ? "BOX double perfect" : "BOX perfect";
-    if (isPerm) return isDouble ? "BOX double permutation" : "BOX permutation";
-    return "";
-  }
-
-  if (["AB", "BC", "AC", "A", "B", "C"].includes(baseType)) return baseType;
-  return "";
-}
+// computeWinType moved to winningUtils.js
 function getDatesBetween(start, end) {
   const dates = [];
   const curr = new Date(start);
@@ -1842,186 +2740,426 @@ function getDatesBetween(start, end) {
 function formatDate(date) {
   return formatDateIST(date);
 }
+
+
+// const getWinningReport = async (req, res) => {
+//   try {
+//     const { fromDate, toDate, time = "ALL", agent } = req.body;
+
+//     if (!fromDate || !toDate) {
+//       return res.status(400).json({ message: "fromDate and toDate are required" });
+//     }
+
+//     /* ----------------------------------
+//        1️⃣ USERS + DESCENDANTS
+//     ---------------------------------- */
+//     const users = await MainUser.find().select("username createdBy scheme");
+
+//     const userMap = {};
+//     users.forEach(u => userMap[u.username] = u);
+
+//     function getAllDescendants(username, visited = new Set()) {
+//       if (visited.has(username)) return [];
+//       visited.add(username);
+
+//       const children = users
+//         .filter(u => u.createdBy === username)
+//         .map(u => u.username);
+
+//       let all = [...children];
+//       children.forEach(c => {
+//         all = all.concat(getAllDescendants(c, visited));
+//       });
+//       return all;
+//     }
+
+//     const agentUsers = agent
+//       ? [agent, ...getAllDescendants(agent)]
+//       : users.map(u => u.username);
+
+//     /* ----------------------------------
+//        2️⃣ DATE RANGE (IST SAFE)
+//     ---------------------------------- */
+//     const start = parseDateISTStart(fromDate);
+//     const end = parseDateISTEnd(toDate);
+
+//     /* ----------------------------------
+//        3️⃣ ENTRY QUERY (🔥 FIXED)
+//     ---------------------------------- */
+//     const entryQuery = {
+//       createdBy: { $in: agentUsers },
+//       isValid: true,
+//       createdAt: { $gte: start, $lte: end }, // ✅ FIX
+//     };
+
+//     if (time !== "ALL") {
+//       entryQuery.timeLabel = new RegExp(time, "i"); // ✅ FLEXIBLE MATCH
+//     }
+
+//     const entries = await Entry.find(entryQuery).lean();
+
+//     if (!entries.length) {
+//       return res.json({ message: "No entries found", bills: [], grandTotal: 0 });
+//     }
+
+//     /* ----------------------------------
+//        4️⃣ FETCH RESULTS
+//     ---------------------------------- */
+//     const datesList = getDatesBetween(start, end).map(d => formatDateIST(d));
+
+//     const resultQuery = { date: { $in: datesList } };
+
+//     const normalizedTime = parseTimeValue(time);
+//     if (normalizedTime && time !== "ALL") {
+//       resultQuery.time = normalizedTime;
+//     }
+
+//     const results = await Result.find(resultQuery).lean();
+
+//     const resultsByTime = {};
+//     for (const r of results) {
+//       if (!resultsByTime[r.time]) resultsByTime[r.time] = [];
+//       resultsByTime[r.time].push(r);
+//     }
+
+//     /* ----------------------------------
+//        5️⃣ FIND RESULT BY DATE + TIME
+//     ---------------------------------- */
+//     function findDayResult(dateStr, timeLabel) {
+//       const t = parseTimeValue(timeLabel);
+//       const list = resultsByTime[t] || [];
+
+//       const found = list.find(r => formatDateIST(new Date(r.date)) === dateStr);
+//       if (!found) return null;
+
+//       return {
+//         "1": found.prizes?.[0] || null,
+//         "2": found.prizes?.[1] || null,
+//         "3": found.prizes?.[2] || null,
+//         "4": found.prizes?.[3] || null,
+//         "5": found.prizes?.[4] || null,
+//         others: (found.entries || []).map(e => e.result).filter(Boolean)
+//       };
+//     }
+
+//     /* ----------------------------------
+//        6️⃣ CALCULATE WINNING ENTRIES
+//     ---------------------------------- */
+//     const winningEntries = [];
+
+//     for (const e of entries) {
+//       const ds = formatDateIST(new Date(e.createdAt));
+//       const dayResult = findDayResult(ds, e.timeLabel);
+
+//       if (!dayResult) continue;
+
+//       const winAmount = calculateWinAmount(e, dayResult);
+//       if (winAmount <= 0) continue;
+
+//       winningEntries.push({
+//         ...e,
+//         date: ds,
+//         winAmount,
+//         baseType: extractBaseType(e.type),
+//         winType: computeWinType(e, dayResult),
+//         name: e.name || "-"
+//       });
+//     }
+
+//     if (!winningEntries.length) {
+//       return res.json({ message: "No winning entries found", bills: [], grandTotal: 0 });
+//     }
+
+//     /* ----------------------------------
+//        7️⃣ GROUP BY BILL
+//     ---------------------------------- */
+//     const billsMap = {};
+
+//     for (const w of winningEntries) {
+//       if (!billsMap[w.billNo]) {
+//         billsMap[w.billNo] = {
+//           billNo: w.billNo,
+//           createdBy: w.createdBy,
+//           scheme: userMap[w.createdBy]?.scheme || "N/A",
+//           winnings: [],
+//           total: 0
+//         };
+//       }
+
+//       billsMap[w.billNo].winnings.push({
+//         number: w.number,
+//         type: w.baseType,
+//         winType: w.winType,
+//         count: w.count,
+//         winAmount: w.winAmount,
+//         name: w.name
+//       });
+
+//       billsMap[w.billNo].total += w.winAmount;
+//     }
+
+//     const bills = Object.values(billsMap);
+//     const grandTotal = bills.reduce((a, b) => a + b.total, 0);
+
+//     return res.json({
+//       fromDate,
+//       toDate,
+//       time,
+//       agent: agent || "ALL",
+//       grandTotal,
+//       bills
+//     });
+
+//   } catch (err) {
+//     console.error("❌ getWinningReport ERROR:", err);
+//     res.status(500).json({ error: err.message });
+//   }
+// };
+
 const getWinningReport = async (req, res) => {
   try {
-    const { fromDate, toDate, time, agent } = req.body;
-    // console.log("\n==============================");
-    // console.log("📥 getWinningReport request:", req.body);
+    let { fromDate, toDate, time = "ALL", agent } = req.body;
 
-    if (!fromDate || !toDate || !time) {
-      return res.status(400).json({ message: "fromDate, toDate, and time are required" });
+    // 🛡️ Security Check: Enforce hierarchical filter if not admin
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      const targetUser = agent || req.user.username;
+      if (!allowed.includes(targetUser)) {
+        return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      agent = targetUser;
     }
 
-    // --- 1) Users + descendants ---
-    const users = await MainUser.find().select("-password");
+    if (!fromDate || !toDate) {
+      return res.status(400).json({ message: "fromDate and toDate are required" });
+    }
 
-    function getAllDescendants(username, usersList, visited = new Set()) {
+    // 🔑 Cache key (request based)
+    const cacheKey = `winningReport:${fromDate}:${toDate}:${time}:${agent || "ALL"}`;
+
+    // ⚡ Check memory cache (Disabled for instant updates)
+    // const cachedData = getCache(cacheKey);
+    // if (cachedData) {
+    //   console.log("⚡ Winning report from MEMORY cache");
+    //   return res.json(cachedData);
+    // }
+
+    console.log("🐢 Winning report from MongoDB");
+
+    /* ================================
+       🔥 ORIGINAL WORKING LOGIC
+       (UNCHANGED)
+    ================================= */
+
+    const users = await MainUser.find().select("username createdBy scheme");
+
+    const userMap = {};
+    users.forEach(u => userMap[u.username] = u);
+
+    function getAllDescendants(username, visited = new Set()) {
       if (visited.has(username)) return [];
       visited.add(username);
-      const children = usersList.filter(u => u.createdBy === username).map(u => u.username);
+
+      const children = users
+        .filter(u => u.createdBy === username)
+        .map(u => u.username);
+
       let all = [...children];
-      children.forEach(child => {
-        all = all.concat(getAllDescendants(child, usersList, visited));
+      children.forEach(c => {
+        all = all.concat(getAllDescendants(c, visited));
       });
       return all;
     }
 
-    const agentUsers = agent ? [agent, ...getAllDescendants(agent, users)] : users.map(u => u.username);
-    // console.log("👥 Agent Users:", agentUsers);
+    const agentUsers = agent
+      ? [agent, ...getAllDescendants(agent)]
+      : users.map(u => u.username);
 
-    // build user->scheme map
-    const userSchemeMap = {};
-    users.forEach(u => { userSchemeMap[u.username] = u.scheme || "N/A"; });
-
-    // --- 2) Date range ---
     const start = parseDateISTStart(fromDate);
     const end = parseDateISTEnd(toDate);
-    // console.log("📅 Date Range (IST):", { 
-    //   start: formatDateIST(start) + ' 00:00:00 IST', 
-    //   end: formatDateIST(end) + ' 23:59:59 IST',
-    //   startUTC: start.toISOString(),
-    //   endUTC: end.toISOString()
-    // });
 
-    // --- 3) Entries ---
     const entryQuery = {
       createdBy: { $in: agentUsers },
       isValid: true,
-      date: { $gte: start, $lte: end },   // ✅ use date field like netPayMultiday
+      date: { $gte: start, $lte: end },
     };
-    if (time !== "ALL") entryQuery.timeLabel = time;
+
+    if (time !== "ALL") {
+      const searchLabels = getSearchLabels(time);
+      entryQuery.timeLabel = { $in: searchLabels };
+    }
 
     const entries = await Entry.find(entryQuery).lean();
-    // console.log("📝 Entries fetched:", entries.length);
-    // if (entries.length > 0) {
-    //   console.log("🔹 Example entry:", entries[0]);
-    // }
 
-    if (entries.length === 0) {
-      // console.log("⚠️ No entries found.");
-      return res.json({ message: "No entries found", bills: [], grandTotal: 0 });
+    if (!entries.length) {
+      const emptyResponse = { message: "No entries found", bills: [], grandTotal: 0 };
+      // setCache(cacheKey, emptyResponse, 300);
+      return res.json(emptyResponse);
     }
 
-    // --- 4) Results ---
-    const allDates = getDatesBetween(new Date(fromDate), new Date(toDate))
-      .map(d => formatDateIST(d)); // ['2025-08-20', '2025-08-21', ...]
+    const datesList = getDatesBetween(start, end).map(d => formatDateIST(d));
 
-    const resultQuery = { date: { $in: allDates } };
+    const resultQuery = { date: { $in: datesList } };
+
     const normalizedTime = parseTimeValue(time);
-    if (normalizedTime) {
+    if (normalizedTime && time !== "ALL") {
       resultQuery.time = normalizedTime;
     }
-    const resultDocs = await Result.find(resultQuery).lean();
-    // console.log('resultQuery', resultQuery)
-    // console.log("🏆 Results fetched:==", resultDocs.length);
-    // console.log("🏆 Results fetched:==", resultDocs);
 
+    const results = await Result.find(resultQuery).lean();
 
-    // Group results by time
     const resultsByTime = {};
-    for (const r of resultDocs) {
+    for (const r of results) {
       if (!resultsByTime[r.time]) resultsByTime[r.time] = [];
       resultsByTime[r.time].push(r);
     }
-    for (const t in resultsByTime) {
-      resultsByTime[t].sort((a, b) => new Date(a.date) - new Date(b.date));
-    }
-    // console.log("🕒 Results grouped by time:", Object.keys(resultsByTime));
 
     function findDayResult(dateStr, timeLabel) {
-      const normalizedTime = parseTimeValue(timeLabel);
-      const list = resultsByTime[normalizedTime] || [];
-      // console.log('list==========', list);
-      const found = [...list].reverse().find(r => {
-        const rd = formatDateIST(new Date(r.date));
-        return rd === dateStr;
-      });
+      const t = parseTimeValue(timeLabel);
+      const list = resultsByTime[t] || [];
+
+      const found = list.find(r => formatDateIST(new Date(r.date)) === dateStr);
       if (!found) return null;
-      const firstFive = Array.isArray(found.prizes) ? found.prizes : [];
-      const othersRaw = Array.isArray(found.entries) ? found.entries : [];
-      const others = othersRaw.map(e => e.result).filter(Boolean);
+
       return {
-        "1": firstFive[0] || null,
-        "2": firstFive[1] || null,
-        "3": firstFive[2] || null,
-        "4": firstFive[3] || null,
-        "5": firstFive[4] || null,
-        others
+        "1": found.prizes?.[0] || null,
+        "2": found.prizes?.[1] || null,
+        "3": found.prizes?.[2] || null,
+        "4": found.prizes?.[3] || null,
+        "5": found.prizes?.[4] || null,
+        others: (found.entries || []).map(e => e.result).filter(Boolean)
       };
     }
 
-    // --- 5) Evaluate wins ---
+    // 🔍 1. Identify "Report Head" and their Scheme
+    const headUsername = req.body.loggedInUser || agent;
+    const reportHead = userMap[headUsername];
+    const headScheme = reportHead?.scheme || "N/A";
+    let activeTab = 1;
+    if (headScheme.toUpperCase() !== "N/A") {
+      activeTab = parseInt(headScheme.replace(/[^0-9]/g, ""), 10) || 1;
+    }
+
+    // 🔍 2. Fetch Scheme Data (Schema) for the Report Head
+    // We fetch unique draw labels from entries to load specific schemes
+    const uniqueTimeLabels = [...new Set(entries.map(e => e.timeLabel))];
+    const schemeCacheInternal = {};
+
+    for (const label of uniqueTimeLabels) {
+      const normalizedLabel = summaryLabelMap[label] || label;
+      const labelNoSpace = label.replace(/\s/g, '');
+      const normNoSpace = normalizedLabel.replace(/\s/g, '');
+
+      // Search for any draw that matches the spaced OR non-spaced labels
+      const searchLabels = [...new Set([label, normalizedLabel, labelNoSpace, normNoSpace])];
+
+      const data = await Schema.findOne(
+        { activeTab, "draws.drawName": { $in: searchLabels } },
+        { draws: { $elemMatch: { drawName: { $in: searchLabels } } } }
+      ).lean();
+      if (data) schemeCacheInternal[label] = data.draws[0];
+    }
+
     const winningEntries = [];
+
     for (const e of entries) {
-      // console.log('entries============', e)
-      const dateObj = new Date(e.date); // ✅ match frontend behavior
-      const ds = formatDateIST(dateObj);
-
+      const ds = formatDateIST(new Date(e.date)); // Use DESIGNATED draw date for result lookup
       const dayResult = findDayResult(ds, e.timeLabel);
-      // console.log(`\n➡️ Checking entry bill:${e.billNo}, num:${e.number}, type:${e.type}, date:${ds}, time:${e.timeLabel}`);
-      if (!dayResult) {
-        // console.log("   ❌ No matching result found for this entry.");
-        continue;
-      }
 
-      const amount = calculateWinAmount(e, dayResult);
-      const winType = computeWinType(e, dayResult);
-      // console.log("   ✅ Found result, winAmount:", amount, "winType:", winType);
+      if (!dayResult) continue;
 
-      if (amount > 0) {
-        // console.log('entries============', e)
+      // Use Report Head's specific scheme data for this draw
+      const drawSchemeData = schemeCacheInternal[e.timeLabel];
+      const wins = calculateWinAmountFull(e, dayResult, drawSchemeData);
+
+      if (!wins || wins.length === 0) continue;
+
+      for (const win of wins) {
         winningEntries.push({
           ...e,
           date: ds,
-          winAmount: amount,
-          baseType: extractBetType(e.type),
-          winType,
-          name: e.name || "-",
+          winAmount: win.prize,
+          superAmount: win.superPrize,
+          totalRate: win.prize + win.superPrize,
+          baseType: extractBaseType(e.type),
+          winType: win.winType,
+          name: e.name || "-"
         });
       }
     }
 
-    // console.log("✅ Total winning entries:", winningEntries.length);
-
-    if (winningEntries.length === 0) {
-      // console.log("⚠️ No winning entries after evaluation.");
-      return res.json({ message: "No winning entries found", bills: [], grandTotal: 0 });
+    if (!winningEntries.length) {
+      const emptyResponse = { message: "No winning entries found", bills: [], grandTotal: 0 };
+      // setCache(cacheKey, emptyResponse, 300);
+      return res.json(emptyResponse);
     }
 
-    // --- 6) Group into bills ---
+    function getPath(username) {
+      const path = [];
+      let curr = userMap[username];
+      while (curr && curr.createdBy) {
+        path.unshift(curr.createdBy);
+        curr = userMap[curr.createdBy];
+      }
+      return path;
+    }
+
     const billsMap = {};
+
     for (const w of winningEntries) {
       if (!billsMap[w.billNo]) {
         billsMap[w.billNo] = {
           billNo: w.billNo,
           createdBy: w.createdBy,
-          scheme: userSchemeMap[w.createdBy] || "N/A",
+          path: getPath(w.createdBy),
+          scheme: headScheme, // Override to Report Head's scheme for frontend super calc
+          drawName: w.timeLabel || "N/A",
           winnings: [],
           total: 0
         };
       }
+
       billsMap[w.billNo].winnings.push({
         number: w.number,
         type: w.baseType,
         winType: w.winType,
         count: w.count,
         winAmount: w.winAmount,
-        name: w.name || "-",
+        superAmount: w.superAmount, // Frontend needs this for super display
+        name: w.name,
+        drawName: w.timeLabel || "N/A", // Added drawName to winnings too just in case
+        timeLabel: w.timeLabel, // Consistent naming
+        createdAt: w.createdAt, // For sorting/display
       });
+
       billsMap[w.billNo].total += w.winAmount;
     }
 
     const bills = Object.values(billsMap);
-    const grandTotal = bills.reduce((acc, bill) => acc + bill.total, 0);
+    const grandTotal = bills.reduce((a, b) => a + b.total, 0);
 
-    // console.log("📦 Bills grouped:", bills.length, "GrandTotal:", grandTotal);
+    const response = {
+      fromDate,
+      toDate,
+      time,
+      agent: agent || "ALL",
+      grandTotal,
+      bills
+    };
 
-    return res.json({ fromDate, toDate, time, agent: agent || "All Agents", grandTotal, bills, usersList: users.map(u => u.username) });
+    // 💾 Cache FINAL correct response (Disabled for instant updates)
+    // setCache(cacheKey, response, 300);
+
+    return res.json(response);
+
   } catch (err) {
-    console.error("[getWinningReport ERROR]", err);
+    console.error("❌ getWinningReport ERROR:", err);
     res.status(500).json({ error: err.message });
   }
 };
+
+
 
 const normalizeDrawLabelLimit = (label) => {
   if (!label || typeof label !== 'string') return '';
@@ -2032,41 +3170,77 @@ const normalizeDrawLabelLimit = (label) => {
     .trim();
 };
 
+// async function getBlockTimeF(drawLabel, loggedInUserType) {
+//   if (!drawLabel || !loggedInUserType) return null;
+//   const records = await BlockTime.find({});
+//   // console.log('records=============', records)
+//   // console.log('drawLabel=============', drawLabel)
+//   // console.log('loggedInUserType=============', loggedInUserType)
+//   // Normalize incoming label to improve matching (e.g., "LSK 3 PM" -> "LSK3")
+
+
+//   const originalLabel = drawLabel;
+//   const normalizedLabel = normalizeDrawLabelLimit(drawLabel);
+
+//   let record = await BlockTime.findOne({ drawLabel: originalLabel, type: loggedInUserType });
+//   // let record2 = await BlockTime.find({});
+//   // console.log('record2=============', record2);
+//   // console.log('record=============', normalizedLabel)
+
+//   if (!record) {
+//     // Try normalized (space/AM/PM removed, uppercased)
+//     record = await BlockTime.findOne({ drawLabel: normalizedLabel, type: loggedInUserType });
+//   }
+
+//   if (!record) {
+//     // Fallback to case-insensitive exact match on normalized form
+//     const escaped = normalizedLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+//     record = await BlockTime.findOne({ drawLabel: { $regex: `^${escaped}$`, $options: 'i' }, type: loggedInUserType });
+//   }
+
+//   if (!record) return null;
+//   // console.log('record=============', record)
+//   return {
+//     blockTime: record.blockTime,
+//     unblockTime: record.unblockTime
+//   };
+// }
+function mapUserTypeToBlockType(userType) {
+  if (!userType) return null;
+
+  const map = {
+    AGENT: "sub",
+    SUB: "sub",
+    ADMIN: "admin",
+    MASTER: "master"
+  };
+
+  return map[userType.toUpperCase()] || null;
+}
+
+// 🔹 Then use it here
 async function getBlockTimeF(drawLabel, loggedInUserType) {
   if (!drawLabel || !loggedInUserType) return null;
-  const records = await BlockTime.find({});
-  // console.log('records=============', records)
-  // console.log('drawLabel=============', drawLabel)
-  // console.log('loggedInUserType=============', loggedInUserType)
-  // Normalize incoming label to improve matching (e.g., "LSK 3 PM" -> "LSK3")
 
+  const normalizedInput = normalizeDrawLabelLimit(drawLabel);
+  const blockType = mapUserTypeToBlockType(loggedInUserType);
 
-  const originalLabel = drawLabel;
-  const normalizedLabel = normalizeDrawLabelLimit(drawLabel);
+  if (!blockType) return null;
 
-  let record = await BlockTime.findOne({ drawLabel: originalLabel, type: loggedInUserType });
-  // let record2 = await BlockTime.find({});
-  // console.log('record2=============', record2);
-  // console.log('record=============', normalizedLabel)
+  const records = await BlockTime.find({ type: blockType });
 
-  if (!record) {
-    // Try normalized (space/AM/PM removed, uppercased)
-    record = await BlockTime.findOne({ drawLabel: normalizedLabel, type: loggedInUserType });
+  for (const record of records) {
+    if (normalizeDrawLabelLimit(record.drawLabel) === normalizedInput) {
+      return {
+        blockTime: record.blockTime,
+        unblockTime: record.unblockTime
+      };
+    }
   }
 
-  if (!record) {
-    // Fallback to case-insensitive exact match on normalized form
-    const escaped = normalizedLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    record = await BlockTime.findOne({ drawLabel: { $regex: `^${escaped}$`, $options: 'i' }, type: loggedInUserType });
-  }
-
-  if (!record) return null;
-  // console.log('record=============', record)
-  return {
-    blockTime: record.blockTime,
-    unblockTime: record.unblockTime
-  };
+  return null;
 }
+
 const getTicketLimits = async () => {
   try {
     const latest = await TicketLimit.findOne().sort({ _id: -1 }); // latest record
@@ -2251,32 +3425,56 @@ const getPermutationsF = (str) => {
 };
 
 // Pure function, no req/res
-const addEntriesF = async ({ entries, timeLabel, timeCode, createdBy, toggleCount, date }) => {
+const addEntriesF = async ({ entries, timeLabel, timeCode, selectedAgent, createdBy, toggleCount, date }) => {
   if (!entries || entries.length === 0) {
     throw new Error("No entries provided");
   }
-  // console.log('date=============', date)
   if (!date) {
     throw new Error("Date is required");
   }
 
   const billNo = await getNextBillNumber();
+  const normCreatedBy = normalizeName(createdBy);
+  const activeSeller = normalizeName(selectedAgent) || normCreatedBy;
 
-  const toSave = entries.map((e) => ({
-    ...e,
-    rate:
-      e.rate ||
-      Number(
-        e?.total || (e.number.length === 1 ? 12 : 10) * e.count
-      ).toFixed(2),
-    timeLabel,
-    timeCode,
-    createdBy,
-    billNo,
-    toggleCount,
-    createdAt: new Date(),
-    date: new Date(date),
-  }));
+  // 🟢 Fetch RateMaster for the active seller and draw (with fallback to 'All')
+  const normalizedDraw = summaryLabelMap[timeLabel] || timeLabel;
+  const rateMaster = await RateMaster.findOne({
+    user: activeSeller,
+    draw: { $in: [normalizedDraw, "All"] }
+  }).sort({ draw: -1 }); // Specific draw > "All"
+
+  const rateLookup = {};
+  (rateMaster?.rates || []).forEach(r => {
+    const key = (r.label || r.name || "").toUpperCase();
+    if (key) {
+      rateLookup[key] = Number(r.rate);
+    }
+  });
+
+  console.log(`📝 [addEntriesF] Rate lookup for ${activeSeller} on ${timeLabel}:`, JSON.stringify(rateLookup));
+
+  const toSave = entries.map((e) => {
+    // Robust extraction of betType (SUPER, BOX, etc.)
+    const betType = extractBaseType(e.type);
+
+    const sellerRate = rateLookup[betType] ?? getRateForType(betType);
+
+    // 🔴 FORCING backend calculation to ensure RateMaster is respected
+    const calculatedTotalRate = (Number(e.count) * sellerRate).toFixed(2);
+
+    return {
+      ...e,
+      rate: calculatedTotalRate,
+      timeLabel,
+      timeCode,
+      createdBy: activeSeller,
+      billNo,
+      toggleCount,
+      createdAt: new Date(),
+      date: new Date(date),
+    };
+  });
   await Entry.insertMany(toSave);
 
   return { message: "Entries saved successfully", billNo };
@@ -2288,6 +3486,12 @@ const saveValidEntries = async (req, res) => {
     // console.log('req.body;============', req.body)
     if (!entries || entries.length === 0) {
       return res.status(400).json({ message: 'No entries provided' });
+    }
+
+    // 🛡️ Hierarchical Sales Block Check (Prevents and blocks descendants from placing bets if ancestor is sales-blocked)
+    const activeSellerForBlock = normalizeName(selectedAgent) || normalizeName(createdBy);
+    if (await isUserOrAncestorSalesBlocked(activeSellerForBlock)) {
+      return res.status(403).json({ message: 'Sales are blocked for this user or their master.' });
     }
     const now = new Date();
     const todayStr = formatDateIST(now);
@@ -2369,130 +3573,270 @@ const saveValidEntries = async (req, res) => {
     // 5️⃣ Fetch remaining from DailyLimitUsage
     const keys = Object.keys(newTotalByNumberType);
     const remainingMap = await countByUsageF(targetDateStr, keys);
+    const generalActualUsageMap = await getGeneralActualUsageMap(targetDateStr, keys);
 
     // 6️⃣ Validate entries
-    const validEntries = [];
-    const exceededEntries = [];
+    let validEntries = [];
+    const exceededMap = {}; // key -> { key, attempted, exceeded, added, reason }
+    const usedInGeneralBatchByNumber = {};
 
+    // PASS 1: General Daily Limits
     for (const entry of expandedEntries) {
       const count = entry.count || 1;
       const rawType = entry.type.replace(timeCode, '').replace(/-/g, '').toUpperCase();
       const number = entry.number;
       const key = `${rawType}-${number}`;
 
-      const maxLimit = parseInt(allLimits[rawType] || '9999', 10);
-      const remainingFromDb = remainingMap[key]?.remaining;
-      const allowedCount = typeof remainingFromDb === 'number'
-        ? remainingFromDb
-        : maxLimit;
+      if (!exceededMap[key]) {
+        exceededMap[key] = { key, attempted: 0, exceeded: 0, added: 0, reason: '', limit: 0 };
+      }
+      exceededMap[key].attempted += count;
 
-      if (allowedCount <= 0) {
-        exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: maxLimit - allowedCount, added: 0 });
+      const maxLimit = parseInt(allLimits[rawType] || '9999', 10);
+      exceededMap[key].limit = maxLimit;
+      const remainingFromDb = remainingMap[key]?.remaining;
+
+      // 🛡️ EFFECTIVE REMAINING (GENERAL)
+      const usedToday = generalActualUsageMap[key] || 0;
+      const effectiveRemaining = Math.max(typeof remainingFromDb === 'number' ? remainingFromDb : 0, maxLimit - usedToday);
+      const remainingForBatch = Math.max(0, effectiveRemaining - (usedInGeneralBatchByNumber[key] || 0));
+
+      if (remainingForBatch <= 0) {
+        exceededMap[key].exceeded += count;
+        exceededMap[key].reason = 'Daily limit reached';
         continue;
       }
 
-      if (count <= allowedCount) {
-        validEntries.push(entry);
+      const willAdd = Math.min(count, remainingForBatch);
+      if (willAdd < count) {
+        exceededMap[key].exceeded += (count - willAdd);
+        exceededMap[key].added += willAdd;
+        exceededMap[key].reason = 'Daily limit partial';
+        validEntries.push({ ...entry, count: willAdd });
+        usedInGeneralBatchByNumber[key] = (usedInGeneralBatchByNumber[key] || 0) + willAdd;
       } else {
-        validEntries.push({ ...entry, count: allowedCount });
-        exceededEntries.push({ key, attempted: count, limit: maxLimit, existing: maxLimit - allowedCount, added: allowedCount });
-      }
-    }
-    // console.log('exceededEntries=============', exceededEntries)
-
-    if (validEntries.length === 0) {
-      // return res.status(400).json({ message: 'All entries exceed allowed limits', exceeded: exceededEntries });
-      const humanLines = exceededEntries.map(e => `${e.key} → attempted ${e.attempted}, remaining 0`);
-      const humanMessage = ['Daily limit reached for:', ...humanLines, '', 'Nothing was saved. Reduce the count and try again.'].join('\n');
-      return res.status(400).json({ message: humanMessage });
-    }
-
-    if (exceededEntries.length > 0) {
-      const humanLines = exceededEntries.map(e => `${e.key} → attempted ${e.attempted}, remaining ${Math.max(0, (e.limit || 0) - (e.existing || 0))}`);
-      const humanMessage = ['Daily limit reached for:', ...humanLines, '', 'Nothing was saved. Reduce the count and try again.'].join('\n');
-      return res.status(400).json({ message: humanMessage });
-    }
-
-
-    const blockedNumbersExceeded = [];
-
-    // 7️⃣ Enforce strict per-user BlockNumber limit
-    for (const entry of validEntries) {
-      const rawTypes = await extractBetType(entry.type)
-      const rawTime = await extractBetTypeTime(entry.type)
-      const number = entry.number;
-      // const block = await BlockNumber.find({createdBy:'4',field:rawTypes});
-      // console.log('block=============', block);
-      // console.log('block=============', entry)
-      // console.log('block=============', rawTypes);
-      // console.log('block=============', rawTime)
-
-
-      const blocked = await BlockNumber.findOne({
-        field: rawTypes,
-        number,
-        drawTime: rawTime,
-        createdBy: loggedInUser, // the agent/user whose limit we check
-        isActive: true,
-      });
-      // console.log('block=============', blocked)
-      if (blocked && blocked.count < entry.count) {
-        blockedNumbersExceeded.push({
-          key: `${rawTypes}-${number}`,
-          attempted: entry.count,
-          remaining: blocked.count
-        });
+        exceededMap[key].added += count;
+        validEntries.push(entry);
+        usedInGeneralBatchByNumber[key] = (usedInGeneralBatchByNumber[key] || 0) + count;
       }
     }
 
-    if (blockedNumbersExceeded.length > 0) {
-      // console.log('blockedNumbersExceeded', blockedNumbersExceeded)
-      const message = blockedNumbersExceeded.map(e => `${e.key} → attempted ${e.attempted}, allowed ${e.remaining}`).join('\n');
-      return res.status(400).json({ message: 'User limit exceeded:\n' + message });
+
+    // PASS 2: Strict Hierarchical Blocked Numbers (Bulk Optimized)
+    const firstType = expandedEntries[0]?.type || "";
+    const currentDrawTime = extractBetTypeTime(firstType);
+    
+    // We already fetched ancestors for Credit Limit, let's fetch them here to check blocked numbers hierarchically
+    const allUsers = await MainUser.find().select("username createdBy").lean();
+    const activeSeller = normalizeName(selectedAgent) || normalizeName(createdBy);
+    
+    // Get chain of command (from current seller up to admin)
+    let sellerAncestors = [];
+    try {
+        sellerAncestors = await getAncestors(activeSeller);
+        if (!sellerAncestors.includes(activeSeller)) {
+            sellerAncestors.unshift(activeSeller); // Ensure the active seller is checked too
+        }
+    } catch (e) {
+        sellerAncestors = [activeSeller];
     }
 
-    // Fetch per-user remaining
-    const userRemainingMap = await countByUserUsageF(targetDateStr, loggedInUser, keys);
-    // console.log('userRemainingMap====', userRemainingMap)
+    // Fetch all BlockNumbers for anyone in the chain of command for this draw
+    const chainBlocks = await BlockNumber.find({
+      createdBy: { $in: sellerAncestors.map(a => new RegExp(`^${a}$`, "i")) },
+      drawTime: currentDrawTime,
+      isActive: true,
+    }).lean();
 
-    // Check per-user daily limit
-    // Check per-user daily limit based on BlockNumber
-    const userExceededEntries = [];
+    // Prepare a map of { ancestorName: { "TYPE-NUMBER": BlockNumberDoc } }
+    const hierarchicalBlockMap = {};
+    chainBlocks.forEach(b => {
+        const creatorNorm = normalizeName(b.createdBy);
+        if (!hierarchicalBlockMap[creatorNorm]) hierarchicalBlockMap[creatorNorm] = {};
+        hierarchicalBlockMap[creatorNorm][`${b.field}-${b.number}`] = b;
+    });
+
+    const keysForBatch = [...new Set(validEntries.map(e => `${extractBaseType(e.type)}-${e.number}`))];
+
+    // Pre-calculate cumulative usage maps for each ancestor that actually has block records
+    const hierarchicalUsageMaps = {};
+    for (const ancestor of sellerAncestors) {
+       const ancestorNorm = normalizeName(ancestor);
+       if (hierarchicalBlockMap[ancestorNorm] && Object.keys(hierarchicalBlockMap[ancestorNorm]).length > 0) {
+           hierarchicalUsageMaps[ancestorNorm] = await getHierarchicalActualUsageMap(targetDateStr, ancestorNorm, allUsers, keysForBatch);
+       }
+    }
+
+    let nextValidEntries = [];
+    for (const entry of validEntries) {
+      const rawTypes = extractBaseType(entry.type);
+      const number = entry.number;
+      const key = `${rawTypes}-${number}`;
+      
+      let entryAllowedCount = entry.count;
+      let blockedByAncestor = null;
+      let bottleneckLimit = null;
+
+      // Check against every ancestor to find the tightest bottleneck for this number
+      for (const ancestor of sellerAncestors) {
+          const ancestorNorm = normalizeName(ancestor);
+          const blockedDoc = hierarchicalBlockMap[ancestorNorm]?.[key];
+          
+          if (blockedDoc && blockedDoc.isActive) {
+              const maxLimit = blockedDoc.count;
+              const alreadyUsedByDownline = hierarchicalUsageMaps[ancestorNorm]?.[key] || 0;
+              const remainingForAncestor = Math.max(0, maxLimit - alreadyUsedByDownline);
+              
+              if (remainingForAncestor < entryAllowedCount) {
+                  entryAllowedCount = remainingForAncestor;
+                  blockedByAncestor = ancestorNorm;
+                  bottleneckLimit = maxLimit;
+              }
+          }
+      }
+
+      if (entryAllowedCount < entry.count) {
+        const removed = entry.count - entryAllowedCount;
+
+        exceededMap[key].exceeded += removed;
+        exceededMap[key].added -= removed;
+        exceededMap[key].reason = `Hierarchical block by ${blockedByAncestor}`;
+        exceededMap[key].limit = bottleneckLimit;
+
+        if (entryAllowedCount > 0) {
+          nextValidEntries.push({ ...entry, count: entryAllowedCount });
+          // If we partially accept it, update the hierarchical tracking instantly for subsequent entries in the same batch
+          for (const ancestor of sellerAncestors) {
+             const ancestorNorm = normalizeName(ancestor);
+             if (hierarchicalUsageMaps[ancestorNorm] !== undefined) {
+                 hierarchicalUsageMaps[ancestorNorm][key] = (hierarchicalUsageMaps[ancestorNorm][key] || 0) + entryAllowedCount;
+             }
+          }
+        }
+      } else {
+        nextValidEntries.push(entry);
+        // Fully accepted, adjust the tracking instantly
+        for (const ancestor of sellerAncestors) {
+             const ancestorNorm = normalizeName(ancestor);
+             if (hierarchicalUsageMaps[ancestorNorm] !== undefined) {
+                 hierarchicalUsageMaps[ancestorNorm][key] = (hierarchicalUsageMaps[ancestorNorm][key] || 0) + entry.count;
+             }
+        }
+      }
+    }
+    validEntries = nextValidEntries;
+
+    // PASS 3: User Daily Usage Limits
+    const keysForUserUsage = [...new Set(validEntries.map(e => `${extractBaseType(e.type)}-${e.number}`))];
+    const userRemainingMap = await countByUserUsageF(targetDateStr, loggedInUser, keysForUserUsage);
+
+    // 🔥 SELF-HEALING: Fetch actual usage to ensure we never have stale "remaining" values
+    const actualUsageMap = await getActualUsageMap(targetDateStr, loggedInUser, keysForUserUsage);
+
+    nextValidEntries = [];
+    const usedInBatchByNumber = {}; // track use within this batch to subtract correctly
 
     for (const entry of validEntries) {
-      const rawTypes = await extractBetType(entry.type);
-      const rawTime = await extractBetTypeTime(entry.type);
+      const rawTypes = extractBaseType(entry.type);
       const number = entry.number;
+      const key = `${rawTypes}-${number}`;
 
-      // Fetch the per-user block number limit
-      const block = await BlockNumber.findOne({
-        field: rawTypes,
-        number,
-        drawTime: rawTime,
-        createdBy: loggedInUser,
-        isActive: true,
-      });
+      const rawType = key.split('-')[0];
+      const maxLimit = parseInt(allLimits[rawType] || '9999', 10); // userBlockMap logic was already handled in PASS 2, fallback to regular max limit here.
 
-      const maxLimit = block?.count ?? parseInt(allLimits[rawTypes] || '9999', 10); // fallback to general limit
-      const remainingFromDb = typeof userRemainingMap[`${rawTypes}-${number}`]?.remaining === 'number'
-        ? userRemainingMap[`${rawTypes}-${number}`].remaining
+      const remainingFromDb = typeof userRemainingMap[key]?.remaining === 'number'
+        ? userRemainingMap[key].remaining
         : maxLimit;
 
-      // console.log('userRemainingMap====', remainingFromDb)
-      if (entry.count > remainingFromDb) {
-        userExceededEntries.push({
-          key: `${rawTypes}-${number}`,
-          attempted: entry.count,
-          remaining: remainingFromDb
-        });
+      // 🛡️ EFFECTIVE REMAINING: Sync with actual database state
+      const usedToday = actualUsageMap[key] || 0;
+      const effectiveRemaining = Math.max(remainingFromDb, maxLimit - usedToday);
+      const remainingForBatch = Math.max(0, effectiveRemaining - (usedInBatchByNumber[key] || 0));
+
+      if (entry.count > remainingForBatch) {
+        const allowed = Math.max(0, remainingForBatch);
+        const removed = entry.count - allowed;
+
+        exceededMap[key].exceeded += removed;
+        exceededMap[key].added -= removed;
+        exceededMap[key].reason = 'User daily limit';
+        exceededMap[key].limit = maxLimit;
+
+        if (allowed > 0) {
+          nextValidEntries.push({ ...entry, count: allowed });
+          usedInBatchByNumber[key] = (usedInBatchByNumber[key] || 0) + allowed;
+        }
+      } else {
+        nextValidEntries.push(entry);
+        usedInBatchByNumber[key] = (usedInBatchByNumber[key] || 0) + entry.count;
       }
     }
-    if (userExceededEntries.length > 0) {
-      const humanLines = userExceededEntries.map(e => `${e.key} → attempted ${e.attempted}, remaining ${e.remaining}`);
-      const humanMessage = ['User daily limit reached for:', ...humanLines, '', 'Nothing was saved. Reduce the count and try again.'].join('\n');
-      return res.status(400).json({ message: humanMessage });
+    validEntries = nextValidEntries;
+
+    const allExceeded = Object.values(exceededMap).filter(e => e.exceeded > 0);
+
+    if (validEntries.length === 0) {
+      const message = allExceeded.map(e => `${e.key}: Blocked ${e.exceeded} (${e.reason})`).join('\n');
+      return res.status(400).json({ message: 'All entries failed validation:\n' + message, exceeded: allExceeded });
     }
 
+
+    /* =========================================
+       🛡️ CUMULATIVE CREDIT LIMIT ENFORCEMENT (Optimized via Summary)
+       ========================================== */
+    const lookupLabel = normalizeDrawLabel(timeLabel);
+    const ancestors = await getAncestors(createdBy);
+    console.log(`[DEBUG-SVE] Ancestors for ${createdBy}:`, ancestors);
+
+    const currentBatchTotal = validEntries.reduce((sum, e) => {
+      const rate = e.rate || (e?.total || (e.number.length === 1 ? 12 : 10) * e.count);
+      return sum + Number(rate);
+    }, 0);
+
+    // Bulk fetch UserAmount and SalesReportSummary for all ancestors
+    const limitDocs = await UserAmount.find({
+      toUser: { $in: ancestors.map(a => new RegExp(`^${a}$`, "i")) },
+      $or: [{ drawTime: lookupLabel }, { drawTime: "ALL" }]
+    }).lean();
+
+    const summaryDocs = await SalesReportSummary.find({
+      createdBy: { $in: ancestors },
+      date: targetDateStr,
+      drawTime: lookupLabel
+    }).lean();
+
+    for (const ancestorName of ancestors) {
+      // Find the most specific limit (specific drawTime > "ALL")
+      const relevantLimits = limitDocs.filter(d => d.toUser.toLowerCase() === ancestorName.toLowerCase());
+      const limitDoc = relevantLimits.find(d => d.drawTime === lookupLabel) || relevantLimits.find(d => d.drawTime === "ALL");
+
+      if (limitDoc) {
+        const limit = limitDoc.amount;
+        const summaryDoc = summaryDocs.find(s => s.createdBy.toLowerCase() === ancestorName.toLowerCase());
+        const totalAlreadySold = summaryDoc ? summaryDoc.totalAmount : 0;
+
+        console.log(`[DEBUG-SVE] ${ancestorName} cumulative (Summary): alreadySold=${totalAlreadySold}, currentBatch=${currentBatchTotal}, limit=${limit}`);
+
+        if (totalAlreadySold + currentBatchTotal > limit) {
+          const isSelf = ancestorName.toLowerCase() === createdBy.toLowerCase();
+          const errorMsg = isSelf
+            ? `Credit limit exceeded for ${timeLabel}.`
+            : `Cumulative credit limit for ${ancestorName} exceeded for ${timeLabel}.`;
+
+          console.log(`[DEBUG-SVE] LIMIT EXCEEDED for ${ancestorName}`);
+          return res.status(400).json({
+            message: errorMsg,
+            details: {
+              ancestor: ancestorName,
+              limit,
+              alreadySold: totalAlreadySold.toFixed(2),
+              currentAttempt: currentBatchTotal.toFixed(2),
+              shortfall: (totalAlreadySold + currentBatchTotal - limit).toFixed(2)
+            }
+          });
+        }
+      }
+    }
 
     const savedBill = await addEntriesF({
       entries: validEntries,
@@ -2546,21 +3890,13 @@ const saveValidEntries = async (req, res) => {
     const ops = Object.entries(usageByTypeNumber).map(([key, used]) => {
       const [rawType, number] = key.split('-');
       const max = parseInt(allLimits[rawType] || '9999', 10);
+      const usedToday = generalActualUsageMap[key] || 0;
+      const newRemaining = Math.max(0, max - (usedToday + used));
+
       return {
         updateOne: {
           filter: { date: targetDateStr, type: rawType, number },
-          update: [
-            {
-              $set: {
-                remaining: {
-                  $let: {
-                    vars: { curr: "$remaining" },
-                    in: { $max: [0, { $subtract: [{ $ifNull: ["$$curr", max] }, used] }] }
-                  }
-                }
-              }
-            }
-          ],
+          update: { $set: { remaining: newRemaining } },
           upsert: true
         }
       };
@@ -2571,40 +3907,24 @@ const saveValidEntries = async (req, res) => {
     }
 
     // Per-user daily limit update
-    // Build per-user usage operations strictly using BlockNumber limits
+    // Update DailyUserLimit by setting the NEW remaining value after this save
+    const userSummaryMap = {}; // number-type -> totalCountInBatch
+    validEntries.forEach((e) => {
+      const key = `${extractBaseType(e.type)}-${e.number}`;
+      userSummaryMap[key] = (userSummaryMap[key] || 0) + (e.count || 1);
+    });
+
     const userOps = await Promise.all(
-      validEntries.map(async (entry) => {
-        const rawType = await extractBetType(entry.type);
-        const rawTime = await extractBetTypeTime(entry.type);
-        const number = entry.number;
-        const count = entry.count || 1;
-
-        // Get the strict per-user BlockNumber limit
-        const block = await BlockNumber.findOne({
-          field: rawType,
-          number,
-          drawTime: rawTime,
-          createdBy: loggedInUser,
-          isActive: true
-        });
-
-        const max = block?.count ?? parseInt(allLimits[rawType] || '9999', 10);
+      Object.entries(userSummaryMap).map(async ([key, count]) => {
+        const [rawType, number] = key.split('-');
+        const max = parseInt(allLimits[rawType] || '9999', 10);
+        const usedToday = actualUsageMap[key] || 0;
+        const newRemaining = Math.max(0, max - (usedToday + count));
 
         return {
           updateOne: {
             filter: { date: targetDateStr, user: loggedInUser, type: rawType, number },
-            update: [
-              {
-                $set: {
-                  remaining: {
-                    $let: {
-                      vars: { curr: '$remaining' },
-                      in: { $max: [0, { $subtract: [{ $ifNull: ['$$curr', max] }, count] }] },
-                    },
-                  },
-                },
-              },
-            ],
+            update: { $set: { remaining: newRemaining } },
             upsert: true,
           },
         };
@@ -2612,9 +3932,21 @@ const saveValidEntries = async (req, res) => {
     );
 
     if (userOps.length > 0) await DailyUserLimit.bulkWrite(userOps);
+    // 1️⃣1️⃣ Update SalesReportSummary Automatically
+    try {
+      const summaryUser = selectedAgent || createdBy || loggedInUser;
+      // Pass validEntries to the helper for aggregation (using targetDateStr)
+      await updateAutomaticSummary(summaryUser, targetDateStr, timeLabel, timeCode, validEntries);
+
+      // 1️⃣2️⃣ Clear local entries cache to ensure reports show fresh data
+      entriesCache.clear();
+      reportCache.clear();
+    } catch (summaryErr) {
+      console.error("❌ Error updating SalesReportSummary:", summaryErr);
+    }
 
 
-    return res.json({ billNo: savedBill.billNo, exceeded: [] });
+    return res.json({ billNo: savedBill.billNo, exceeded: allExceeded });
 
   } catch (err) {
     console.error('Error saving entries:', err);
@@ -2803,167 +4135,963 @@ const saveValidEntries = async (req, res) => {
 //   }
 // };
 // 🆕 New endpoint: Sales Report
-const getSalesReport = async (req, res) => {
-  try {
-    const { fromDate, toDate, createdBy, timeLabel, loggedInUser } = req.query;
+// const getSalesReport = async (req, res) => {
+//   try {
+//     const { fromDate, toDate, createdBy, timeLabel, loggedInUser } = req.query;
 
-    // console.log("📥 getSalesReport request:", req.query);
+//     // console.log("📥 getSalesReport request:", req.query);
 
-    // 1️⃣ Build agent list (loggedInUser or createdBy + descendants)
-    const allUsers = await MainUser.find().select("username createdBy");
-    let agentList = [];
-    if (!createdBy) {
-      agentList = [loggedInUser, ...getDescendants(loggedInUser, allUsers)];
-    } else {
-      agentList = [createdBy, ...getDescendants(createdBy, allUsers)];
-    }
-    // console.log("👥 Agent Users (backend):", agentList);
+//     // 1️⃣ Build agent list (loggedInUser or createdBy + descendants)
+//     const allUsers = await MainUser.find().select("username createdBy");
+//     let agentList = [];
+//     if (!createdBy) {
+//       agentList = [loggedInUser, ...getDescendants(loggedInUser, allUsers)];
+//     } else {
+//       agentList = [createdBy, ...getDescendants(createdBy, allUsers)];
+//     }
+//     // console.log("👥 Agent Users (backend):", agentList);
 
-    // 2️⃣ Build query for entries
-    const entryQuery = {
-      createdBy: { $in: agentList },
-      date: { $gte: new Date(fromDate), $lte: new Date(toDate) },
-    };
-    if (timeLabel && timeLabel !== "all") {
-      entryQuery.timeLabel = timeLabel;
-    }
+//     // 2️⃣ Build query for entries
+//     const entryQuery = {
+//       createdBy: { $in: agentList },
+//       date: { $gte: new Date(fromDate), $lte: new Date(toDate) },
+//     };
+//     if (timeLabel && timeLabel !== "all") {
+//       entryQuery.timeLabel = timeLabel;
+//     }
 
-    const entries = await Entry.find(entryQuery);
-    const last10Entries = await Entry.find({}).sort({ _id: -1 }).limit(2);
-    // console.log("entrie===========11", entryQuery)
-    // console.log("entrie===========12", last10Entries)
-    // console.log("entrie===========13", entries);
-    // console.log("📝 Entries fetched (backend):", entries.length);
-    // if (entries.length > 0) console.log("🔹 Example entry:", entries[0]);
+//     const entries = await Entry.find(entryQuery);
+//     const last10Entries = await Entry.find({}).sort({ _id: -1 }).limit(2);
+//     // console.log("entrie===========11", entryQuery)
+//     // console.log("entrie===========12", last10Entries)
+//     // console.log("entrie===========13", entries);
+//     // console.log("📝 Entries fetched (backend):", entries.length);
+//     // if (entries.length > 0) console.log("🔹 Example entry:", entries[0]);
 
-    // 3️⃣ Fetch RateMaster for each draw
-    const userForRate = loggedInUser;
+//     // 3️⃣ Fetch RateMaster for each draw
+//     const userForRate = loggedInUser;
 
-    // console.log('userForRate===========', userForRate)
-    // console.log('timeLabel===========', timeLabel)
+//     // console.log('userForRate===========', userForRate)
+//     // console.log('timeLabel===========', timeLabel)
 
-    // Get unique draws from entries
-    const uniqueDraws = [...new Set(entries.map(entry => entry.timeLabel))];
-    // console.log('uniqueDraws===========', uniqueDraws);
+//     // Get unique draws from entries
+//     const uniqueDraws = [...new Set(entries.map(entry => entry.timeLabel))];
+//     // console.log('uniqueDraws===========', uniqueDraws);
 
-    // Fetch rate masters for each draw
-    const rateMastersByDraw = {};
-    for (const draw of uniqueDraws) {
-      let rateMasterQuery = { user: userForRate };
+//     // Fetch rate masters for each draw
+//     const rateMastersByDraw = {};
+//     for (const draw of uniqueDraws) {
+//       let rateMasterQuery = { user: userForRate };
 
-      if (draw === "LSK 3 PM") {
-        rateMasterQuery.draw = "KERALA 3 PM";
-      } else {
-        rateMasterQuery.draw = draw;
-      }
+//       if (draw === "LSK 3 PM") {
+//         rateMasterQuery.draw = "KERALA 3 PM";
+//       } else {
+//         rateMasterQuery.draw = draw;
+//       }
 
-      // console.log(`rateMasterQuery for ${draw}:`, rateMasterQuery);
-      const rateMaster = await RateMaster.findOne(rateMasterQuery);
-      // console.log(`rateMaster for ${draw}:`, rateMaster);
+//       // console.log(`rateMasterQuery for ${draw}:`, rateMasterQuery);
+//       const rateMaster = await RateMaster.findOne(rateMasterQuery);
+//       // console.log(`rateMaster for ${draw}:`, rateMaster);
 
-      const rateLookup = {};
-      (rateMaster?.rates || []).forEach(r => {
-        rateLookup[r.label] = Number(r.rate) || 10;
-      });
-      rateMastersByDraw[draw] = rateLookup;
-    }
+//       const rateLookup = {};
+//       (rateMaster?.rates || []).forEach(r => {
+//         rateLookup[r.label] = Number(r.rate) || 10;
+//       });
+//       rateMastersByDraw[draw] = rateLookup;
+//     }
 
-    // console.log("💰 Rate masters by draw:", rateMastersByDraw);
+//     // console.log("💰 Rate masters by draw:", rateMastersByDraw);
 
-    // Helper: extract bet type
-    const extractBetType = (typeStr) => {
-      // console.log('typeStr', typeStr);
-      if (!typeStr) return "SUPER";
+//     // Helper: extract bet type
+//     const extractBetType = (typeStr) => {
+//       // console.log('typeStr', typeStr);
+//       if (!typeStr) return "SUPER";
 
-      // Handle different patterns: LSK3SUPER, D-1-A, etc.
-      if (typeStr.toUpperCase().includes("SUPER")) {
-        return "SUPER";
-      } else if (typeStr.toUpperCase().includes("BOX")) {
-        return "BOX";
-      } else if (typeStr.toUpperCase().includes("AB")) {
-        return "AB";
-      } else if (typeStr.toUpperCase().includes("BC")) {
-        return "BC";
-      } else if (typeStr.toUpperCase().includes("AC")) {
-        return "AC";
-      } else if (typeStr.includes("-A") || typeStr.endsWith("A")) {
-        return "A";
-      } else if (typeStr.includes("-B") || typeStr.endsWith("B")) {
-        return "B";
-      } else if (typeStr.includes("-C") || typeStr.endsWith("C")) {
-        return "C";
-      }
+//       // Handle different patterns: LSK3SUPER, D-1-A, etc.
+//       if (typeStr.toUpperCase().includes("SUPER")) {
+//         return "SUPER";
+//       } else if (typeStr.toUpperCase().includes("BOX")) {
+//         return "BOX";
+//       } else if (typeStr.toUpperCase().includes("AB")) {
+//         return "AB";
+//       } else if (typeStr.toUpperCase().includes("BC")) {
+//         return "BC";
+//       } else if (typeStr.toUpperCase().includes("AC")) {
+//         return "AC";
+//       } else if (typeStr.includes("-A") || typeStr.endsWith("A")) {
+//         return "A";
+//       } else if (typeStr.includes("-B") || typeStr.endsWith("B")) {
+//         return "B";
+//       } else if (typeStr.includes("-C") || typeStr.endsWith("C")) {
+//         return "C";
+//       }
 
-      // Fallback: extract from parts
-      const parts = typeStr.split("-");
-      return parts[parts.length - 1];
-    };
+//       // Fallback: extract from parts
+//       const parts = typeStr.split("-");
+//       return parts[parts.length - 1];
+//     };
 
-    // 4️⃣ Calculate totals
-    let totalCount = 0;
-    let totalSales = 0;
+//     // 4️⃣ Calculate totals
+//     let totalCount = 0;
+//     let totalSales = 0;
 
-    entries.forEach(entry => {
-      const count = Number(entry.count) || 0;
-      const betType = extractBetType(entry.type);
-      const draw = entry.timeLabel;
-      const rateLookup = rateMastersByDraw[draw] || {};
-      const rate = rateLookup[betType] ?? 10;
+//     entries.forEach(entry => {
+//       const count = Number(entry.count) || 0;
+//       const betType = extractBetType(entry.type);
+//       const draw = entry.timeLabel;
+//       const rateLookup = rateMastersByDraw[draw] || {};
+//       const rate = rateLookup[betType] ?? 10;
 
-      // console.log(`Entry: ${entry.type}, Draw: ${draw}, BetType: ${betType}, Rate: ${rate}, Count: ${count}`);
+//       // console.log(`Entry: ${entry.type}, Draw: ${draw}, BetType: ${betType}, Rate: ${rate}, Count: ${count}`);
 
-      totalCount += count;
-      totalSales += count * rate;
-      entry.rate = count * rate;
-    });
+//       totalCount += count;
+//       totalSales += count * rate;
+//       entry.rate = count * rate;
+//     });
 
-    // 5️⃣ Build optional per-agent summary
-    const perAgentMap = {};
-    entries.forEach((entry) => {
-      const agent = entry.createdBy || "unknown";
-      if (!perAgentMap[agent]) {
-        perAgentMap[agent] = { agent, count: 0, amount: 0 };
-      }
-      perAgentMap[agent].count += Number(entry.count) || 0;
-      perAgentMap[agent].amount += Number(entry.rate) || 0;
-    });
-    const byAgent = Object.values(perAgentMap).sort((a, b) => b.amount - a.amount);
+//     // 5️⃣ Build optional per-agent summary
+//     const perAgentMap = {};
+//     entries.forEach((entry) => {
+//       const agent = entry.createdBy || "unknown";
+//       if (!perAgentMap[agent]) {
+//         perAgentMap[agent] = { agent, count: 0, amount: 0 };
+//       }
+//       perAgentMap[agent].count += Number(entry.count) || 0;
+//       perAgentMap[agent].amount += Number(entry.rate) || 0;
+//     });
+//     const byAgent = Object.values(perAgentMap).sort((a, b) => b.amount - a.amount);
 
-    const report = {
-      count: totalCount,
-      amount: totalSales,
-      date: `${fromDate} to ${toDate} (${timeLabel || "all"})`,
-      fromDate,
-      toDate,
-      createdBy,
-      timeLabel,
-      entries,
-      byAgent,
-    };
+//     const report = {
+//       count: totalCount,
+//       amount: totalSales,
+//       date: `${fromDate} to ${toDate} (${timeLabel || "all"})`,
+//       fromDate,
+//       toDate,
+//       createdBy,
+//       timeLabel,
+//       entries,
+//       byAgent,
+//     };
 
-    // console.log("✅ Final Sales Report (backend):", report);
-    res.json(report);
+//     // console.log("✅ Final Sales Report (backend):", report);
+//     res.json(report);
 
-  } catch (err) {
-    console.error("❌ Error in getSalesReport:", err);
-    res.status(500).json({ error: err.message });
-  }
-};
+//   } catch (err) {
+//     console.error("❌ Error in getSalesReport:", err);
+//     res.status(500).json({ error: err.message });
+//   }
+// };
 
-// Helper (same logic as frontend getDescendants)
-function getDescendants(user, allUsers = []) {
+
+// In-memory controlled cache
+// Key: `${loggedInUser}-${createdBy}-${fromDate}-${toDate}-${timeLabel}`
+// Value: report object
+// Value: report object
+const reportCache = new Map();
+
+// --- Helper to get all descendants ---
+function getDescendants(username, allUsers) {
+  const normUsername = normalizeName(username);
   const descendants = [];
-  const stack = [user];
+  const stack = [normUsername];
   while (stack.length) {
     const current = stack.pop();
-    const children = allUsers.filter(u => u.createdBy === current);
+    const children = allUsers.filter(u => normalizeName(u.createdBy) === current);
     children.forEach(c => {
-      descendants.push(c.username);
-      stack.push(c.username);
+      const normChild = normalizeName(c.username);
+      descendants.push(normChild);
+      stack.push(normChild);
     });
   }
   return descendants;
 }
+
+// --- Helper to get bet type ---
+
+// --- Main function ---
+// const getSalesReport = async (req, res) => {
+//   try {
+//     const { fromDate, toDate, createdBy, timeLabel, loggedInUser } = req.query;
+
+//     // --- Step 0: Build controlled cache key ---
+//     const cacheKey = `${loggedInUser}-${createdBy || 'all'}-${fromDate}-${toDate}-${timeLabel || 'all'}`;
+//     if (reportCache.has(cacheKey)) {
+//       console.log('📦 Returning cached report for', cacheKey);
+//       return res.json(reportCache.get(cacheKey));
+//     }
+
+//     // --- Step 1: Build agent list ---
+//     const allUsers = await MainUser.find().select("username createdBy");
+//     const agentList = createdBy
+//       ? [createdBy, ...getDescendants(createdBy, allUsers)]
+//       : [loggedInUser, ...getDescendants(loggedInUser, allUsers)];
+
+//     // --- Step 2: Fetch entries ---
+//     const start = parseDateISTStart(fromDate);
+//     const end = parseDateISTEnd(toDate);
+//     const entryQuery = {
+//       createdBy: { $in: agentList },
+//       createdAt: { $gte: start, $lte: end },
+//       isValid: true,
+//     };
+//     if (timeLabel && timeLabel !== "all") entryQuery.timeLabel = timeLabel;
+
+//     const entries = await Entry.find(entryQuery);
+
+//     // --- Step 3: Fetch rate masters ---
+//     const userForRate = loggedInUser;
+//     const uniqueDraws = [...new Set(entries.map(e => e.timeLabel))];
+//     const rateMastersByDraw = {};
+
+//     for (const draw of uniqueDraws) {
+//       const rateMasterQuery = { user: userForRate, draw: draw === "LSK 3 PM" ? "KERALA 3 PM" : draw };
+//       const rateMaster = await RateMaster.findOne(rateMasterQuery);
+
+//       const rateLookup = {};
+//       (rateMaster?.rates || []).forEach(r => {
+//         rateLookup[r.name || r.label] = Number(r.rate) || 10;
+//       });
+//       rateMastersByDraw[draw] = rateLookup;
+//     }
+
+//     // --- Step 4: Calculate totals ---
+//     let totalCount = 0;
+//     let totalSales = 0;
+//     entries.forEach(entry => {
+//       const count = Number(entry.count) || 0;
+//       const betType = getBetType(entry.type);
+//       const draw = entry.timeLabel;
+//       const rate = rateMastersByDraw[draw]?.[betType] ?? 10;
+
+//       totalCount += count;
+//       totalSales += count * rate;
+//       entry.rate = count * rate;
+//     });
+
+//     // --- Step 5: Aggregate per agent ---
+//     const perAgentMap = {};
+//     entries.forEach(entry => {
+//       const agent = entry.createdBy || "unknown";
+//       if (!perAgentMap[agent]) perAgentMap[agent] = { agent, count: 0, amount: 0 };
+//       perAgentMap[agent].count += Number(entry.count) || 0;
+//       perAgentMap[agent].amount += Number(entry.rate) || 0;
+//     });
+//     const byAgent = Object.values(perAgentMap).sort((a, b) => b.amount - a.amount);
+
+//     // --- Step 6: Build report ---
+//     const report = {
+//       count: totalCount,
+//       amount: totalSales,
+//       date: `${fromDate} to ${toDate} (${timeLabel || "all"})`,
+//       fromDate,
+//       toDate,
+//       createdBy,
+//       timeLabel,
+//       entries,
+//       byAgent,
+//     };
+
+//     // --- Step 7: Store in cache for 5 minutes ---
+//     reportCache.set(cacheKey, report);
+//     setTimeout(() => reportCache.delete(cacheKey), 5 * 60 * 1000);
+
+//     return res.json(report);
+//   } catch (err) {
+//     console.error("❌ Error in getSalesReport:", err);
+//     res.status(500).json({ error: err.message });
+//   }
+// };
+
+// const getSalesReport = async (req, res) => {
+//   try {
+//     const { fromDate, toDate, createdBy, timeLabel, loggedInUser } = req.query;
+
+//     console.log("📥 [getSalesReport] Request Query:", { fromDate, toDate, createdBy, timeLabel, loggedInUser });
+
+//     if (!fromDate || !toDate) {
+//       return res.status(400).json({ message: "fromDate and toDate are required" });
+//     }
+
+//     const allUsers = await MainUser.find().select("username createdBy");
+//     const normCreatedBy = normalizeName(createdBy);
+//     const normLoggedInUser = normalizeName(loggedInUser);
+
+//     const agentList = normCreatedBy
+//       ? [normCreatedBy, ...getDescendants(normCreatedBy, allUsers)]
+//       : [normLoggedInUser, ...getDescendants(normLoggedInUser, allUsers)];
+
+//     const filter = {
+//       date: { $gte: fromDate, $lte: toDate },
+//       createdBy: { $in: agentList }
+//     };
+
+//     if (timeLabel && timeLabel !== "all") {
+//       filter.drawTime = summaryLabelMap[timeLabel.trim()] || timeLabel.trim().toUpperCase();
+//     }
+
+//     const targetUser = normCreatedBy || normLoggedInUser || "";
+
+//     // To show the Parent Totals + Direct Children Breakdown, we only need them.
+//     // Descendants are now pre-aggregated in the summary docs!
+//     const children = allUsers.filter(u => normalizeName(u.createdBy) === targetUser).map(u => normalizeName(u.username));
+//     const summaryAgentList = [targetUser, ...children];
+
+//     const { view = "summary" } = req.query;
+//     console.log(`🔍 [getSalesReport] Filter: ${JSON.stringify(filter)} (View: ${view})`);
+
+//     let finalEntries = [];
+//     let totalCount = 0;
+//     let totalAmount = 0;
+//     const perAgentMap = {};
+
+//     // --- 1. SUMMARY VIEW (Hierarchical Path) ---
+//     // We only use the optimized path if view is NOT explicitly "detailed"
+//     if (view !== "detailed") {
+//       // Filter for Parent + Direct Children only
+//       const summaryFilter = { ...filter, createdBy: { $in: summaryAgentList } };
+//       const summaries = await SalesReportSummary.find(summaryFilter);
+//       console.log(`📊 [getSalesReport] Summaries found for ${view} view: ${summaries.length} (Target: ${targetUser})`);
+
+//       if (summaries.length > 0) {
+//         const userForRate = loggedInUser || createdBy || "";
+//         const uniqueDraws = [...new Set(summaries.map(s => s.drawTime))];
+//         const rateMastersByDraw = {};
+
+//         summaries.forEach(s => {
+//           const agent = normalizeName(s.createdBy);
+//           const isTarget = (agent === targetUser);
+//           const isDirectChild = children.includes(agent);
+
+//           // 🟢 Use stored amounts from DB!
+//           let selfCountAtLevel = Number(s.selfCount) || 0;
+//           let branchCountAtLevel = Number(s.totalCount) || 0;
+
+//           let selfAmountAtLevel = Number(s.selfAmount) || 0;
+//           let branchAmountAtLevel = Number(s.totalAmount) || 0;
+
+//           if (isTarget) {
+//             totalCount += selfCountAtLevel;
+//             totalAmount += selfAmountAtLevel;
+
+//             if (!perAgentMap[agent]) perAgentMap[agent] = { agent, count: 0, amount: 0 };
+//             perAgentMap[agent].count += selfCountAtLevel;
+//             perAgentMap[agent].amount += selfAmountAtLevel;
+
+//             // Populate 'finalEntries' for parent's self only
+//             (s.schemes?.[0]?.rows || []).forEach(r => {
+//               const rowCount = (Number(r.count) || 0);
+//               const rowAmount = (Number(r.amount) || 0);
+//               // If this is a summary level, we need to extract the 'self' portion of the rowAmount
+//               // But SalesReportSummary rows currently store the BRANCH total for that scheme.
+//               // To be perfectly accurate for 'view self', we'd need selfAmount per scheme.
+//               // For now, we use the weight to approximate (this is consistent with existing logic).
+//               const selfWeight = branchCountAtLevel > 0 ? (selfCountAtLevel / branchCountAtLevel) : 1;
+//               const selfPartCount = rowCount * selfWeight;
+//               const selfPartAmount = rowAmount * selfWeight;
+
+//               if (selfPartCount > 0) {
+//                 const rowUnitRate = Number((selfPartAmount / selfPartCount).toFixed(2));
+//                 finalEntries.push({
+//                   _id: s._id, createdBy: agent, date: s.date, drawTime: s.drawTime,
+//                   type: r.scheme, count: selfPartCount,
+//                   rate: selfPartAmount, // Frontend expects TOTAL amount here
+//                   amount: selfPartAmount,
+//                   unitRate: rowUnitRate
+//                 });
+//               }
+//             });
+//           } else if (isDirectChild) {
+//             totalCount += branchCountAtLevel;
+//             totalAmount += branchAmountAtLevel;
+
+//             if (!perAgentMap[agent]) perAgentMap[agent] = { agent, count: 0, amount: 0 };
+//             perAgentMap[agent].count += branchCountAtLevel;
+//             perAgentMap[agent].amount += branchAmountAtLevel;
+//           }
+//         });
+
+//         return res.json({
+//           count: totalCount, amount: totalAmount,
+//           date: `${fromDate} to ${toDate} (${timeLabel || "all"})`,
+//           fromDate, toDate, createdBy, timeLabel,
+//           entries: finalEntries,
+//           byAgent: Object.values(perAgentMap).sort((a, b) => b.count - a.count)
+//         });
+//       }
+
+//       // If zero summaries found for summary view, still return an empty result (strict behavior)
+//       return res.json({
+//         count: 0,
+//         date: `${fromDate} to ${toDate} (${timeLabel || "all"})`,
+//         fromDate, toDate, createdBy, timeLabel,
+//         entries: [],
+//         byAgent: []
+//       });
+//     }
+
+//     // --- 2. DETAILED VIEW OR FALLBACK (Raw Entries Path) ---
+//     // Fetch directly from Entry collection for bill-by-bill history or fallback
+//     const start = parseDateISTStart(fromDate);
+//     const end = parseDateISTEnd(toDate);
+
+//     const entryQuery = {
+//       createdBy: { $in: agentList },
+//       createdAt: { $gte: start, $lte: end },
+//       isValid: { $ne: false }
+//     };
+
+//     if (timeLabel && timeLabel !== "all") {
+//       const normalized = summaryLabelMap[timeLabel.trim()] || timeLabel.trim().toUpperCase();
+//       if (normalized === "KERALA 3 PM") {
+//         entryQuery.timeLabel = { $in: ["KERALA 3 PM", "LSK 3 PM"] };
+//       } else {
+//         entryQuery.timeLabel = timeLabel;
+//       }
+//     }
+
+//     console.log(`🔍 [getSalesReport] Fetching Entry data...`);
+//     const rawEntries = await Entry.find(entryQuery);
+
+//     if (rawEntries.length > 0) {
+//       // 🟢 Recalculate based on EACH seller's RateMaster for true branch accuracy
+//       const sellers = [...new Set(rawEntries.map(e => normalizeName(e.createdBy)))];
+//       const draws = [...new Set(rawEntries.map(e => (e.timeLabel || "").trim().toUpperCase()))];
+
+//       const drawSearch = draws.map(d => summaryLabelMap[d] || d);
+//       if (!drawSearch.includes("All")) drawSearch.push("All");
+
+//       console.log(`🔍 [getSalesReport] Bulk fetching RateMasters for ${sellers.length} sellers...`);
+//       const allRateMasters = await RateMaster.find({
+//         user: { $in: sellers.map(s => new RegExp(`^${s}$`, 'i')) },
+//         draw: { $in: drawSearch }
+//       }).sort({ draw: -1 }); // Specific draw > "All"
+
+//       const rateMastersCache = {}; // key: seller|draw
+//       allRateMasters.forEach(rm => {
+//         const u = normalizeName(rm.user);
+//         const d = rm.draw;
+//         const lookup = {};
+//         (rm.rates || []).forEach(r => {
+//           const key = (r.label || r.name || "").toUpperCase();
+//           if (key) lookup[key] = Number(r.rate) || getRateForType(key);
+//         });
+//         rateMastersCache[`${u}|${d}`] = lookup;
+//       });
+
+//       rawEntries.forEach(e => {
+//         const entryCount = (Number(e.count) || 1);
+//         const seller = normalizeName(e.createdBy);
+//         const draw = (e.timeLabel || "").trim().toUpperCase();
+//         const rmDraw = summaryLabelMap[draw] || draw;
+
+//         const rateLookup = rateMastersCache[`${seller}|${rmDraw}`] || rateMastersCache[`${seller}|All`] || {};
+//         const betType = extractBaseType(e.type);
+//         const rate = rateLookup[betType] ?? getRateForType(betType);
+//         const entryAmount = rate * entryCount;
+
+//         const sellerAgent = e.createdBy;
+
+//         // 1. Grand Totals (Everything in agentList is part of the branch)
+//         totalCount += entryCount;
+//         totalAmount += entryAmount;
+
+//         // 2. Group for the 'By Agent' breakdown list
+//         let sellerDirectParent = normalizeName(allUsers.find(u => normalizeName(u.username) === normalizeName(sellerAgent))?.createdBy);
+//         let groupingAgent = normalizeName(sellerAgent);
+
+//         if (groupingAgent !== targetUser && sellerDirectParent !== targetUser) {
+//           // It's a deep descendant, find the direct child of targetUser in the path
+//           const path = [groupingAgent];
+//           let ancestor = sellerDirectParent;
+//           while (ancestor && ancestor !== targetUser && !path.includes(ancestor)) {
+//             path.push(ancestor);
+//             ancestor = normalizeName(allUsers.find(u => normalizeName(u.username) === ancestor)?.createdBy);
+//           }
+//           if (ancestor === targetUser) {
+//             groupingAgent = path[path.length - 1]; // The direct child of targetUser
+//           }
+//         }
+
+//         if (!perAgentMap[groupingAgent]) perAgentMap[groupingAgent] = { agent: groupingAgent, count: 0, amount: 0 };
+//         perAgentMap[groupingAgent].count += entryCount;
+//         perAgentMap[groupingAgent].amount += entryAmount;
+
+//         finalEntries.push({
+//           _id: e._id,
+//           billNo: e.billNo,
+//           createdBy: sellerAgent,
+//           date: formatDateIST(e.createdAt),
+//           drawTime: e.timeLabel,
+//           type: betType,
+//           count: entryCount,
+//           rate: entryAmount, // Frontend expects TOTAL amount here
+//           amount: entryAmount,
+//           unitRate: rate
+//         });
+//       });
+//     }
+
+//     return res.json({
+//       count: totalCount, amount: totalAmount,
+//       date: `${fromDate} to ${toDate} (${timeLabel || "all"})`,
+//       fromDate, toDate, createdBy, timeLabel,
+//       entries: finalEntries.sort((a, b) => String(b._id).localeCompare(String(a._id))),
+//       byAgent: Object.values(perAgentMap).sort((a, b) => b.count - a.count)
+//     });
+
+//   } catch (err) {
+//     console.error("❌ [getSalesReport] Error:", err);
+//     res.status(500).json({ message: "Internal server error", error: err.message });
+//   }
+// };
+
+const getSalesReport = async (req, res) => {
+  try {
+    let { fromDate, toDate, createdBy, timeLabel, loggedInUser } = req.query;
+
+    // 🛡️ Security Check: Enforce hierarchical access if not admin
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      
+      const targetUser = createdBy || loggedInUser || req.user.username;
+      
+      if (!allowed.includes(normalizeName(targetUser))) {
+          return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      
+      // If valid, ensure the identity is consistent
+      loggedInUser = req.user.username;
+      createdBy = targetUser;
+    }
+
+    console.log("📥 [getSalesReport] Request Query:", { fromDate, toDate, createdBy, timeLabel, loggedInUser });
+
+    if (!fromDate || !toDate) {
+      return res.status(400).json({ message: "fromDate and toDate are required" });
+    }
+
+    const allUsers = await MainUser.find().select("username createdBy");
+    const normCreatedBy = normalizeName(createdBy);
+    const normLoggedInUser = normalizeName(loggedInUser);
+
+    const agentList = normCreatedBy
+      ? [normCreatedBy, ...getDescendants(normCreatedBy, allUsers)]
+      : [normLoggedInUser, ...getDescendants(normLoggedInUser, allUsers)];
+
+    const filter = {
+      date: { $gte: fromDate, $lte: toDate },
+      createdBy: { $in: agentList }
+    };
+
+    if (timeLabel && timeLabel !== "all") {
+      const searchLabels = getSearchLabels(timeLabel);
+      filter.drawTime = { $in: searchLabels };
+    }
+
+    const targetUser = normCreatedBy || normLoggedInUser || "";
+
+    // To show the Parent Totals + Direct Children Breakdown, we only need them.
+    // Descendants are now pre-aggregated in the summary docs!
+    const children = allUsers.filter(u => normalizeName(u.createdBy) === targetUser).map(u => normalizeName(u.username));
+    const summaryAgentList = [targetUser, ...children];
+
+    const { view = "summary" } = req.query;
+    console.log(`🔍 [getSalesReport] Filter: ${JSON.stringify(filter)} (View: ${view})`);
+
+    let finalEntries = [];
+    let totalCount = 0;
+    let totalAmount = 0;
+    const perAgentMap = {};
+
+    // --- 1. SUMMARY VIEW (Hierarchical Path) ---
+    // We only use the optimized path if view is NOT explicitly "detailed"
+    if (view !== "detailed") {
+      // Filter for Parent + Direct Children only
+      const summaryFilter = { ...filter, createdBy: { $in: summaryAgentList } };
+      const summaries = await SalesReportSummary.find(summaryFilter);
+      console.log(`📊 [getSalesReport] Summaries found for ${view} view: ${summaries.length} (Target: ${targetUser})`);
+
+      if (summaries.length > 0) {
+        const userForRate = loggedInUser || createdBy || "";
+        const uniqueDraws = [...new Set(summaries.map(s => s.drawTime))];
+        const rateMastersByDraw = {};
+
+        summaries.forEach(s => {
+          const agent = normalizeName(s.createdBy);
+          const isTarget = (agent === targetUser);
+          const isDirectChild = children.includes(agent);
+
+          // 🟢 Use stored amounts from DB!
+          let selfCountAtLevel = Number(s.selfCount) || 0;
+          let branchCountAtLevel = Number(s.totalCount) || 0;
+
+          let selfAmountAtLevel = Number(s.selfAmount) || 0;
+          let branchAmountAtLevel = Number(s.totalAmount) || 0;
+
+          if (isTarget) {
+            totalCount += selfCountAtLevel;
+            totalAmount += selfAmountAtLevel;
+
+            if (!perAgentMap[agent]) perAgentMap[agent] = { agent, count: 0, amount: 0 };
+            perAgentMap[agent].count += selfCountAtLevel;
+            perAgentMap[agent].amount += selfAmountAtLevel;
+
+            // Populate 'finalEntries' for parent's self only
+            (s.schemes?.[0]?.rows || []).forEach(r => {
+              const rowCount = (Number(r.count) || 0);
+              const rowAmount = (Number(r.amount) || 0);
+              // If this is a summary level, we need to extract the 'self' portion of the rowAmount
+              // But SalesReportSummary rows currently store the BRANCH total for that scheme.
+              // To be perfectly accurate for 'view self', we'd need selfAmount per scheme.
+              // For now, we use the weight to approximate (this is consistent with existing logic).
+              const selfWeight = branchCountAtLevel > 0 ? (selfCountAtLevel / branchCountAtLevel) : 1;
+              const selfPartCount = rowCount * selfWeight;
+              const selfPartAmount = rowAmount * selfWeight;
+
+              if (selfPartCount > 0) {
+                const rowUnitRate = Number((selfPartAmount / selfPartCount).toFixed(2));
+                finalEntries.push({
+                  _id: s._id, createdBy: agent, date: s.date,
+                  drawTime: s.drawTime, timeLabel: s.drawTime,
+                  createdAt: s.createdAt,
+                  type: r.scheme, count: selfPartCount,
+                  rate: selfPartAmount, // Frontend expects TOTAL amount here
+                  amount: selfPartAmount,
+                  unitRate: rowUnitRate
+                });
+              }
+            });
+          } else if (isDirectChild) {
+            totalCount += branchCountAtLevel;
+            totalAmount += branchAmountAtLevel;
+
+            if (!perAgentMap[agent]) perAgentMap[agent] = { agent, count: 0, amount: 0 };
+            perAgentMap[agent].count += branchCountAtLevel;
+            perAgentMap[agent].amount += branchAmountAtLevel;
+          }
+        });
+
+        return res.json({
+          count: totalCount, amount: totalAmount,
+          date: `${fromDate} to ${toDate} (${timeLabel || "all"})`,
+          fromDate, toDate, createdBy, timeLabel,
+          entries: finalEntries,
+          byAgent: Object.values(perAgentMap).sort((a, b) => b.count - a.count)
+        });
+      }
+
+      // If zero summaries found for summary view, still return an empty result (strict behavior)
+      return res.json({
+        count: 0,
+        date: `${fromDate} to ${toDate} (${timeLabel || "all"})`,
+        fromDate, toDate, createdBy, timeLabel,
+        entries: [],
+        byAgent: []
+      });
+    }
+
+    // --- 2. DETAILED VIEW OR FALLBACK (Raw Entries Path) ---
+    // Fetch directly from Entry collection for bill-by-bill history or fallback
+    const start = parseDateISTStart(fromDate);
+    const end = parseDateISTEnd(toDate);
+
+    const entryQuery = {
+      createdBy: { $in: agentList },
+      date: { $gte: start, $lte: end },
+      isValid: { $ne: false }
+    };
+
+    if (timeLabel && timeLabel !== "all") {
+      const searchLabels = getSearchLabels(timeLabel);
+      entryQuery.timeLabel = { $in: searchLabels };
+    }
+
+    console.log(`🔍 [getSalesReport] Fetching Entry data...`);
+    const rawEntries = await Entry.find(entryQuery).lean();
+
+    if (rawEntries.length > 0) {
+      // 🚀 Optimization: Create a user map for O(1) lookups
+      const userLookupMap = {};
+      allUsers.forEach(u => {
+        userLookupMap[normalizeName(u.username)] = normalizeName(u.createdBy);
+      });
+
+      // 🟢 Recalculate based on EACH seller's RateMaster for true branch accuracy
+      const sellers = [...new Set(rawEntries.map(e => normalizeName(e.createdBy)))];
+      const draws = [...new Set(rawEntries.map(e => (e.timeLabel || "").trim().toUpperCase()))];
+
+      const drawSearch = draws.map(d => summaryLabelMap[d] || d);
+      if (!drawSearch.includes("All")) drawSearch.push("All");
+
+      console.log(`🔍 [getSalesReport] Bulk fetching RateMasters for ${sellers.length} sellers...`);
+      // 🚀 Optimization: Avoid Regex searching if possible, or use a simpler match
+      const allRateMasters = await RateMaster.find({
+        user: { $in: sellers }, // Assuming normalized names match or using a case-insensitive collation if needed
+        draw: { $in: drawSearch }
+      }).lean();
+
+      const rateMastersCache = {}; // key: seller|draw
+      allRateMasters.forEach(rm => {
+        const u = normalizeName(rm.user);
+        const d = rm.draw;
+        const lookup = {};
+        (rm.rates || []).forEach(r => {
+          const key = (r.label || r.name || "").toUpperCase();
+          if (key) lookup[key] = Number(r.rate) || getRateForType(key);
+        });
+        rateMastersCache[`${u}|${d}`] = lookup;
+      });
+
+      rawEntries.forEach(e => {
+        const entryCount = (Number(e.count) || 1);
+        const seller = normalizeName(e.createdBy);
+        const draw = (e.timeLabel || "").trim().toUpperCase();
+        const rmDraw = summaryLabelMap[draw] || draw;
+
+        const rateLookup = rateMastersCache[`${seller}|${rmDraw}`] || rateMastersCache[`${seller}|All`] || {};
+        const betType = extractBaseType(e.type);
+        const entryAmount = Number(e.rate);   // 🔒 frozen at entry time
+        const unitRate = entryCount > 0 ? (entryAmount / entryCount) : 0;
+        const sellerAgent = e.createdBy;
+
+        // 1. Grand Totals (Everything in agentList is part of the branch)
+        totalCount += entryCount;
+        totalAmount += entryAmount;
+
+        // 2. Group for the 'By Agent' breakdown list
+        // 🚀 Optimization: Use userLookupMap instead of allUsers.find
+        let sellerDirectParent = userLookupMap[seller];
+        let groupingAgent = seller;
+
+        if (groupingAgent !== targetUser && sellerDirectParent !== targetUser) {
+          // It's a deep descendant, find the direct child of targetUser in the path
+          const path = [groupingAgent];
+          let ancestor = sellerDirectParent;
+          while (ancestor && ancestor !== targetUser && !path.includes(ancestor)) {
+            path.push(ancestor);
+            ancestor = userLookupMap[ancestor];
+          }
+          if (ancestor === targetUser) {
+            groupingAgent = path[path.length - 1]; // The direct child of targetUser
+          }
+        }
+
+        if (!perAgentMap[groupingAgent]) perAgentMap[groupingAgent] = { agent: groupingAgent, count: 0, amount: 0 };
+        perAgentMap[groupingAgent].count += entryCount;
+        perAgentMap[groupingAgent].amount += entryAmount;
+
+        finalEntries.push({
+          _id: e._id,
+          billNo: e.billNo,
+          createdBy: sellerAgent,
+          date: formatDateIST(e.createdAt),
+          drawTime: e.timeLabel,
+          timeLabel: e.timeLabel, // Frontend expects timeLabel
+          createdAt: e.createdAt, // Frontend expects createdAt (ISO)
+          number: e.number || e.num || e.betNumber || "",
+          num: e.number || e.num || e.betNumber || "",
+          type: betType,
+          count: entryCount,
+          rate: entryAmount, // Frontend expects TOTAL amount here
+          amount: entryAmount,
+          unitRate: unitRate
+        });
+      });
+    }
+
+    return res.json({
+      count: totalCount, amount: totalAmount,
+      date: `${fromDate} to ${toDate} (${timeLabel || "all"})`,
+      fromDate, toDate, createdBy, timeLabel,
+      entries: finalEntries.sort((a, b) => String(b._id).localeCompare(String(a._id))),
+      byAgent: Object.values(perAgentMap).sort((a, b) => b.count - a.count)
+    });
+
+  } catch (err) {
+    console.error("❌ [getSalesReport] Error:", err);
+    res.status(500).json({ message: "Internal server error", error: err.message });
+  }
+};
+
+// const getSalesReport = async (req, res) => {
+//   try {
+//     const { fromDate, toDate, createdBy, timeLabel, loggedInUser } = req.query;
+
+//     if (!fromDate || !toDate) {
+//       return res.status(400).json({ message: "fromDate and toDate are required" });
+//     }
+
+//     const allUsers = await MainUser.find().select("username createdBy");
+//     const normCreatedBy = normalizeName(createdBy);
+//     const normLoggedInUser = normalizeName(loggedInUser);
+
+//     const agentList = normCreatedBy
+//       ? [normCreatedBy, ...getDescendants(normCreatedBy, allUsers)]
+//       : [normLoggedInUser, ...getDescendants(normLoggedInUser, allUsers)];
+
+//     const filter = {
+//       date: { $gte: fromDate, $lte: toDate },
+//       createdBy: { $in: agentList }
+//     };
+
+//     if (timeLabel && timeLabel !== "all") {
+//       filter.drawTime = summaryLabelMap[timeLabel.trim()] || timeLabel.trim().toUpperCase();
+//     }
+
+//     const targetUser = normCreatedBy || normLoggedInUser || "";
+//     const children = allUsers.filter(u => normalizeName(u.createdBy) === targetUser)
+//                              .map(u => normalizeName(u.username));
+//     const summaryAgentList = [targetUser, ...children];
+
+//     const { view = "summary" } = req.query;
+//     let finalEntries = [];
+//     let totalCount = 0;
+//     let totalAmount = 0;
+//     const perAgentMap = {};
+
+//     // --- 1. SUMMARY VIEW ---
+//     if (view !== "detailed") {
+//       const summaryFilter = { ...filter, createdBy: { $in: summaryAgentList } };
+//       const summaries = await SalesReportSummary.find(summaryFilter);
+
+//       summaries.forEach(s => {
+//         const agent = normalizeName(s.createdBy);
+//         const isTarget = agent === targetUser;
+//         const isDirectChild = children.includes(agent);
+
+//         const selfCountAtLevel = Number(s.selfCount) || 0;
+//         const branchCountAtLevel = Number(s.totalCount) || 0;
+//         const selfAmountAtLevel = Number(s.selfAmount) || 0;
+//         const branchAmountAtLevel = Number(s.totalAmount) || 0;
+
+//         if (isTarget) {
+//           totalCount += selfCountAtLevel;
+//           totalAmount += selfAmountAtLevel;
+
+//           if (!perAgentMap[agent]) perAgentMap[agent] = { agent, count: 0, amount: 0 };
+//           perAgentMap[agent].count += selfCountAtLevel;
+//           perAgentMap[agent].amount += selfAmountAtLevel;
+
+//           (s.schemes?.[0]?.rows || []).forEach(r => {
+//             const rowCount = Number(r.count) || 0;
+//             const rowAmount = Number(r.amount) || 0;
+//             const selfWeight = branchCountAtLevel > 0 ? (selfCountAtLevel / branchCountAtLevel) : 1;
+//             const selfPartCount = rowCount * selfWeight;
+//             const selfPartAmount = rowAmount * selfWeight;
+
+//             if (selfPartCount > 0) {
+//               finalEntries.push({
+//                 _id: s._id,
+//                 createdBy: agent,
+//                 date: s.date,
+//                 drawTime: s.drawTime,
+//                 type: r.scheme,
+//                 count: selfPartCount,
+//                 rate: selfPartAmount,  // use stored amount
+//                 amount: selfPartAmount,
+//                 unitRate: selfPartCount > 0 ? (selfPartAmount / selfPartCount) : 0
+//               });
+//             }
+//           });
+//         } else if (isDirectChild) {
+//           totalCount += branchCountAtLevel;
+//           totalAmount += branchAmountAtLevel;
+
+//           if (!perAgentMap[agent]) perAgentMap[agent] = { agent, count: 0, amount: 0 };
+//           perAgentMap[agent].count += branchCountAtLevel;
+//           perAgentMap[agent].amount += branchAmountAtLevel;
+//         }
+//       });
+
+//       return res.json({
+//         count: totalCount,
+//         amount: totalAmount,
+//         date: `${fromDate} to ${toDate} (${timeLabel || "all"})`,
+//         fromDate, toDate, createdBy, timeLabel,
+//         entries: finalEntries,
+//         byAgent: Object.values(perAgentMap).sort((a, b) => b.count - a.count)
+//       });
+//     }
+
+//     // --- 2. DETAILED VIEW ---
+//     const start = parseDateISTStart(fromDate);
+//     const end = parseDateISTEnd(toDate);
+
+//     const entryQuery = {
+//       createdBy: { $in: agentList },
+//       createdAt: { $gte: start, $lte: end },
+//       isValid: { $ne: false }
+//     };
+
+//     if (timeLabel && timeLabel !== "all") {
+//       const normalized = summaryLabelMap[timeLabel.trim()] || timeLabel.trim().toUpperCase();
+//       entryQuery.timeLabel = normalized === "KERALA 3 PM" ? { $in: ["KERALA 3 PM", "LSK 3 PM"] } : normalized;
+//     }
+
+//     const rawEntries = await Entry.find(entryQuery);
+
+//     rawEntries.forEach(e => {
+//       const entryCount = Number(e.count) || 1;
+//       const entryAmount = Number(e.rate) || 0;  // ✅ USE STORED RATE HERE
+//       const sellerAgent = e.createdBy;
+
+//       totalCount += entryCount;
+//       totalAmount += entryAmount;
+
+//       let sellerDirectParent = normalizeName(allUsers.find(u => normalizeName(u.username) === normalizeName(sellerAgent))?.createdBy);
+//       let groupingAgent = normalizeName(sellerAgent);
+
+//       if (groupingAgent !== targetUser && sellerDirectParent !== targetUser) {
+//         const path = [groupingAgent];
+//         let ancestor = sellerDirectParent;
+//         while (ancestor && ancestor !== targetUser && !path.includes(ancestor)) {
+//           path.push(ancestor);
+//           ancestor = normalizeName(allUsers.find(u => normalizeName(u.username) === ancestor)?.createdBy);
+//         }
+//         if (ancestor === targetUser) {
+//           groupingAgent = path[path.length - 1];
+//         }
+//       }
+
+//       if (!perAgentMap[groupingAgent]) perAgentMap[groupingAgent] = { agent: groupingAgent, count: 0, amount: 0 };
+//       perAgentMap[groupingAgent].count += entryCount;
+//       perAgentMap[groupingAgent].amount += entryAmount;
+
+//       finalEntries.push({
+//         _id: e._id,
+//         billNo: e.billNo,
+//         createdBy: sellerAgent,
+//         date: formatDateIST(e.createdAt),
+//         drawTime: e.timeLabel,
+//         type: extractBaseType(e.type),
+//         count: entryCount,
+//         rate: entryAmount,
+//         amount: entryAmount,
+//         unitRate: entryAmount / entryCount
+//       });
+//     });
+
+//     return res.json({
+//       count: totalCount,
+//       amount: totalAmount,
+//       date: `${fromDate} to ${toDate} (${timeLabel || "all"})`,
+//       fromDate, toDate, createdBy, timeLabel,
+//       entries: finalEntries.sort((a, b) => String(b._id).localeCompare(String(a._id))),
+//       byAgent: Object.values(perAgentMap).sort((a, b) => b.count - a.count)
+//     });
+
+//   } catch (err) {
+//     console.error("❌ [getSalesReport] Error:", err);
+//     res.status(500).json({ message: "Internal server error", error: err.message });
+//   }
+// };
+
+
+
+
+
+
 
 
 // =======================
@@ -3186,7 +5314,12 @@ const deleteBlockedNumber = async (req, res) => {
 // ✅ Get blocked numbers by user and draw time
 const getBlockedNumbersByUser = async (req, res) => {
   try {
-    const { createdBy, drawTime } = req.params;
+    let { createdBy, drawTime } = req.params;
+
+    // 🛡️ Security Check: Enforce user filter if not admin
+    if (req.user.userType !== 'admin') {
+      createdBy = req.user.username;
+    }
 
     if (!createdBy || !drawTime) {
       return res.status(400).json({
@@ -3251,7 +5384,24 @@ const bulkDeleteBlockedNumbers = async (req, res) => {
 // GET all overflow limits
 const getOverflowLimit = async (req, res) => {
   try {
-    const limits = await OverflowLimit.find();
+    let userFilter = req.query.user || "";
+
+    // 🛡️ Security Check: If not admin, restrict to descendants only
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      
+      if (userFilter) {
+        if (!allowed.includes(userFilter)) {
+          return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+        }
+      } else {
+        userFilter = { $in: allowed };
+      }
+    }
+
+    const query = userFilter ? { user: userFilter } : {};
+    const limits = await OverflowLimit.find(query);
     res.status(200).json(limits);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -3289,7 +5439,31 @@ const getOverflowLimitByDrawTime = async (req, res) => {
       });
     }
 
-    const data = await OverflowLimit.findOne({ drawTime });
+    // 🛡️ Security Check: If not admin, restrict to descendants only
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      const targetUser = req.query.user || req.user.username;
+
+      if (!allowed.includes(targetUser)) {
+        return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      
+      const data = await OverflowLimit.findOne({ 
+        user: targetUser, 
+        drawTime 
+      });
+      if (!data) return res.status(404).json({ message: 'No limit set' });
+      return res.status(200).json(data);
+    } else {
+       const userFilter = req.query.user || "";
+       const data = await OverflowLimit.findOne({ 
+          user: userFilter, 
+          drawTime 
+        });
+       if (!data) return res.status(404).json({ message: 'No limit set' });
+       return res.status(200).json(data);
+    }
 
     if (!data) {
       return res.status(404).json({
@@ -3306,76 +5480,1242 @@ const getOverflowLimitByDrawTime = async (req, res) => {
   }
 };
 
-const getDrawByTime = async (req, res) => {
+
+// ================= GET a draw by tab and drawName =================
+
+// Get draw by drawName and activeTab
+const getDrawByTabAndName = async (req, res) => {
   try {
-    const { draw } = req.query; // get from query param
+    const { activeTab, drawName } = req.query;
 
-    if (!draw) return res.status(400).json({ message: "Draw is required" });
+    if (!activeTab || !drawName) {
+      return res.status(400).json({ message: "activeTab and drawName are required" });
+    }
 
-    const drawData = await Schema.findOne({ draw });
+    const data = await Schema.findOne(
+      {
+        activeTab: Number(activeTab),
+        "draws.drawName": drawName
+      },
+      {
+        draws: { $elemMatch: { drawName } }
+      }
+    );
 
-    if (!drawData) return res.status(404).json({ message: "Draw not found" });
+    if (!data) {
+      return res.status(404).json({ message: "Draw + tab not found" });
+    }
 
-    res.json(drawData);
+    res.json({
+      activeTab: data.activeTab,
+      draw: data.draws[0]
+    });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Error fetching draw scheme" });
+    res.status(500).json({ message: err.message });
   }
 };
 
 
-const addDrawScheme = async (req, res) => {
-  try {
-    const data = req.body;
 
-    const draw = new Schema(data);
-    await draw.save();
+
+// ================= ADD a draw to a tab =================
+// const addDrawToTab = async (req, res) => {
+//   try {
+//     const { activeTab, drawName, schemes } = req.body;
+
+//     if (!activeTab || !drawName || !schemes)
+//       return res.status(400).json({ message: "activeTab, drawName and schemes are required" });
+
+//     // Find if tab exists
+//     let tabData = await Schema.findOne({ activeTab: Number(activeTab) });
+
+//     const newDraw = { drawName, schemes };
+
+//     if (tabData) {
+//       // Tab exists → add draw
+//       tabData.draws.push(newDraw);
+//       await tabData.save();
+//       return res.status(201).json({ message: "Draw added to existing tab", data: tabData });
+//     } else {
+//       // Tab does not exist → create new tab with draw
+//       const newTab = new Schema({
+//         activeTab: Number(activeTab),
+//         draws: [newDraw],
+//       });
+//       await newTab.save();
+//       return res.status(201).json({ message: "Tab and draw created", data: newTab });
+//     }
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ message: "Error adding draw" });
+//   }
+// };
+
+// ================= ADD/UPDATE a draw to a tab =================
+// ================= ADD/UPDATE a draw to a tab =================
+// ================= ADD/UPDATE a draw to a tab =================
+const addDrawToTab = async (req, res) => {
+  try {
+    const { activeTab, drawName, schemes } = req.body;
+    if (!activeTab || !drawName || !schemes)
+      return res.status(400).json({ message: "activeTab, drawName and schemes are required" });
+    let tabData = await Schema.findOne({ activeTab: Number(activeTab) });
+    if (tabData) {
+      const drawIndex = tabData.draws.findIndex(d => d.drawName === drawName);
+      if (drawIndex !== -1) {
+        // UPDATE existing draw. schemes is already grouped from the app now.
+        tabData.draws[drawIndex].schemes = schemes;
+      } else {
+        // ADD new draw
+        tabData.draws.push({ drawName, schemes });
+      }
+
+      tabData.markModified('draws');
+      await tabData.save();
+      return res.status(201).json({ message: "Saved successfully", data: tabData });
+    } else {
+      const newTab = new Schema({
+        activeTab: Number(activeTab),
+        draws: [{ drawName, schemes }],
+      });
+      await newTab.save();
+      return res.status(201).json({ message: "Created successfully", data: newTab });
+    }
+  } catch (err) {
+    console.error("Error saving scheme:", err);
+    res.status(500).json({ message: "Error saving scheme" });
+  }
+};
+
+// ================= UPDATE super for a specific draw =================
+
+// const updateSuperForDraw = async (req, res) => {
+//   try {
+//     const { activeTab, drawName, updates } = req.body;
+
+//     if (!activeTab || !drawName || !updates) {
+//       return res.status(400).json({ message: "Missing data" });
+//     }
+
+//     const doc = await Schema.findOne({ activeTab });
+
+//     if (!doc) {
+//       return res.status(404).json({ message: "Tab not found" });
+//     }
+
+//     const draw = doc.draws.find(d => d.drawName === drawName);
+
+//     if (!draw) {
+//       return res.status(404).json({ message: "Draw not found" });
+//     }
+
+//     updates.forEach(u => {
+//       const group = draw.schemes.find(g => g.group === u.group);
+//       if (!group) return;
+
+//       const row = group.rows.find(
+//         r => r.scheme === u.scheme && r.pos === u.pos
+//       );
+
+//       if (row) row.super = u.super;
+//     });
+
+//     await doc.save();
+
+//     res.json({ message: "Super updated successfully" });
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ message: "Server error" });
+//   }
+// };
+
+const updateSuperForDraw = async (req, res) => {
+  try {
+    const { activeTab, drawName, updates } = req.body;
+    if (!activeTab || !drawName || !updates || !Array.isArray(updates)) {
+      return res.status(400).json({ message: "Missing or invalid data" });
+    }
+    const doc = await Schema.findOne({ activeTab: Number(activeTab) });
+    if (!doc) return res.status(404).json({ message: "Tab not found" });
+    const draw = doc.draws.find(d => d.drawName === drawName);
+    if (!draw) return res.status(404).json({ message: "Draw not found" });
+    updates.forEach(u => {
+      let row;
+      // Navigate through GROUPS to find the ROW
+      for (const group of draw.schemes) {
+        if (group.rows && Array.isArray(group.rows)) {
+          // Find by ID or by matching scheme/pos
+          row = group.rows.find(r =>
+            (u._id && r._id && r._id.toString() === u._id.toString()) ||
+            (r.scheme === u.scheme && r.pos === Number(u.pos))
+          );
+          if (row) {
+            const superValue = Number(u.super);
+            row.super = isNaN(superValue) ? 0 : superValue;
+            console.log(`Updated Row [${row.scheme} ${row.pos}] to ${row.super}`);
+            break;
+          }
+        }
+      }
+    });
+    doc.markModified('draws');
+    await doc.save();
+    res.json({ message: "Super updated successfully" });
+  } catch (err) {
+    console.error("Error updating super:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+
+
+
+
+
+
+
+
+const addUserAmount = async (req, res) => {
+  try {
+    const { fromUser, toUser, amount, drawTime = "ALL" } = req.body;
+
+    if (!fromUser || !toUser || amount === undefined) {
+      return res.status(400).json({ message: "fromUser, toUser, amount required" });
+    }
+
+    // optional safety check
+    const userExists = await MainUser.findOne({ username: toUser });
+    if (!userExists) {
+      return res.status(404).json({ message: "Selected user not found" });
+    }
+
+    // Upsert the limit: update if existing (toUser + drawTime), else create new
+    const updatedLimit = await UserAmount.findOneAndUpdate(
+      { toUser, drawTime },
+      { fromUser, amount, date: new Date() },
+      { new: true, upsert: true }
+    );
 
     res.status(201).json({
-      message: "Draw scheme added successfully",
-      data: draw,
+      message: "Amount set successfully",
+      data: updatedLimit
     });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 };
 
-
-const updateSuperOnly = async (req, res) => {
-  const { draw, schemes } = req.body;
-
-  if (!draw || !schemes) {
-    return res.status(400).json({ message: "draw and schemes are required" });
-  }
-
+const getUserAmounts = async (req, res) => {
   try {
-    // Find the draw scheme by draw time
-    const drawDoc = await Schema.findOne({ draw });
-    if (!drawDoc) return res.status(404).json({ message: "Draw not found" });
+    let { toUser } = req.query;
 
-    // Loop over the groups and rows to update only the 'super' values
-    schemes.forEach((groupUpdate) => {
-      const dbGroup = drawDoc.schemes.find(g => g.group === groupUpdate.group);
-      if (dbGroup) {
-        groupUpdate.rows.forEach((rowUpdate) => {
-          const dbRow = dbGroup.rows.find(r => r.scheme === rowUpdate.scheme);
-          if (dbRow) {
-            dbRow.super = rowUpdate.super; // Update only super
-          }
-        });
+    // 🛡️ Security Check: Enforce user filter if not admin
+    if (req.user.userType !== 'admin') {
+      toUser = req.user.username;
+    }
+
+    const filter = {};
+    if (toUser) filter.toUser = toUser;
+
+    const data = await UserAmount.find(filter).sort({ drawTime: 1 });
+
+    res.status(200).json({
+      message: "User amount data fetched successfully",
+      data
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+const updateAmountOnly = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { amount } = req.body;
+
+    if (!amount) {
+      return res.status(400).json({ message: "amount is required" });
+    }
+
+    const updatedData = await UserAmount.findByIdAndUpdate(
+      id,
+      { amount },
+      { new: true }
+    );
+
+    if (!updatedData) {
+      return res.status(404).json({ message: "Record not found" });
+    }
+
+    res.status(200).json({
+      message: "Amount updated successfully",
+      data: updatedData
+    });
+
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+const syncSummaries = async (req, res) => {
+  try {
+    const { fromDate, toDate } = req.body;
+    if (!fromDate || !toDate) {
+      return res.status(400).json({ message: "fromDate and toDate required (YYYY-MM-DD)" });
+    }
+
+    const start = parseDateISTStart(fromDate);
+    const end = parseDateISTEnd(toDate);
+
+    console.log(`🔄 [syncSummaries] Syncing from ${fromDate} to ${toDate}`);
+
+    // 0. Cleanup: Delete existing summaries in this range to avoid duplicates
+    await SalesReportSummary.deleteMany({
+      date: { $gte: fromDate, $lte: toDate }
+    });
+    console.log(`🧹 [syncSummaries] Cleaned up existing summaries for the range`);
+
+    // 1. Fetch entries
+    const entries = await Entry.find({
+      createdAt: { $gte: start, $lte: end },
+      isValid: { $ne: false }
+    });
+
+    console.log(`📊 [syncSummaries] Found ${entries.length} valid entries`);
+
+    if (entries.length === 0) {
+      return res.json({ message: "No entries found to sync", processedEntries: 0 });
+    }
+
+    // 2. Fetch all users to get IDs and Parents
+    const allUsers = await MainUser.find().select("username _id createdBy");
+    const userMap = {};
+    const parentMap = {};
+    allUsers.forEach(u => {
+      const uname = normalizeName(u.username);
+      userMap[uname] = u._id;
+      parentMap[uname] = normalizeName(u.createdBy);
+    });
+
+    // 3. Grouping logic (Hierarchical)
+    const groups = {}; // key: date|user|drawTime
+
+    entries.forEach(e => {
+      const dateStr = formatDateIST(e.createdAt);
+      const seller = normalizeName(e.createdBy);
+      const draw = e.timeLabel || "unknown";
+
+      // Extract scheme (e.g., SUPER, BOX, AB, A)
+      const drawCode = (e.timeCode || "").toUpperCase();
+      let scheme = (e.type || "SUPER").toUpperCase().replace(drawCode, '').replace(/-/g, '').trim();
+      if (!scheme) scheme = "SUPER";
+
+      const entryCount = (Number(e.count) || 1);
+
+      // Propagate up the hierarchy
+      let currentPathName = seller;
+      const visited = new Set();
+      const normalizedDraw = summaryDrawMap[draw] || draw;
+      while (currentPathName && !visited.has(currentPathName)) {
+        visited.add(currentPathName);
+        const key = `${dateStr}|${currentPathName}|${normalizedDraw}`;
+
+        if (!groups[key]) {
+          groups[key] = {
+            userId: userMap[currentPathName],
+            createdBy: currentPathName,
+            date: dateStr,
+            drawTime: draw,
+            selfCount: 0,
+            childCount: 0,
+            totalCount: 0,
+            selfSchemes: {},
+            childSchemes: {}
+          };
+        }
+
+        const isSeller = (currentPathName === seller);
+        if (isSeller) {
+          groups[key].selfCount += entryCount;
+          groups[key].selfSchemes[scheme] = (groups[key].selfSchemes[scheme] || 0) + entryCount;
+        } else {
+          groups[key].childCount += entryCount;
+          groups[key].childSchemes[scheme] = (groups[key].childSchemes[scheme] || 0) + entryCount;
+        }
+        groups[key].totalCount += entryCount;
+
+        currentPathName = parentMap[currentPathName];
       }
     });
 
-    await drawDoc.save();
+    // 4. Fetch RateMasters for relevant users
+    const summaryDrawMap = {
+      "DEAR 1 PM": "DEAR 1 PM",
+      "KERALA 3 PM": "KERALA 3 PM",
+      "LSK 3 PM": "KERALA 3 PM",
+      "DEAR 6 PM": "DEAR 6 PM",
+      "DEAR 8 PM": "DEAR 8 PM"
+    };
 
-    res.json({ message: "Super values updated successfully", data: drawDoc });
+    const drawVariantSets = new Set();
+    Object.values(groups).forEach(g => {
+      const u = normalizeName(g.createdBy);
+      const d = summaryDrawMap[g.drawTime] || g.drawTime;
+      drawVariantSets.add(`${u}|${d}`);
+      drawVariantSets.add(`${u}|All`);
+    });
+
+    const rateMasters = await RateMaster.find({
+      $or: Array.from(drawVariantSets).map(ug => {
+        const [user, draw] = ug.split('|');
+        return { user, draw };
+      })
+    });
+
+    const rateMap = {}; // key: user|draw
+    // Sort rateMasters so "All" comes first, then specific draws (which will overwrite "All")
+    rateMasters.sort((a, b) => (a.draw === "All" ? -1 : 1)).forEach(rm => {
+      const lookup = {};
+      (rm.rates || []).forEach(r => {
+        const key = (r.label || r.name || "").toUpperCase();
+        if (key) lookup[key] = Number(r.rate) || 10;
+      });
+      rateMap[`${normalizeName(rm.user)}|${rm.draw}`] = lookup;
+    });
+
+    // Helper to get rate with fallback
+    const getSyncRate = (user, draw, type) => {
+      const u = normalizeName(user);
+      const d = summaryDrawMap[draw] || draw;
+      const specific = rateMap[`${u}|${d}`]?.[type];
+      if (specific !== undefined) return specific;
+      return rateMap[`${u}|All`]?.[type] ?? getRateForType(type);
+    };
+
+    // 5. Transform and Save (Bulk Upsert)
+    const ops = [];
+    for (const data of Object.values(groups)) {
+      if (!data.userId) continue;
+
+      const summaryDrawTime = data.drawTime;
+      const lookup = rateMap[`${normalizeName(data.createdBy)}|${summaryDrawTime}`] || {};
+
+      let selfAmount = 0;
+      let childAmount = 0;
+
+      // Calculate amounts
+      Object.entries(data.selfSchemes).forEach(([scheme, count]) => {
+        selfAmount += count * getSyncRate(data.createdBy, data.drawTime, scheme);
+      });
+      Object.entries(data.childSchemes).forEach(([scheme, count]) => {
+        childAmount += count * getSyncRate(data.createdBy, data.drawTime, scheme);
+      });
+
+      // Combined scheme rows for the document
+      const allSchemes = {};
+      Object.entries(data.selfSchemes).forEach(([s, c]) => {
+        if (!allSchemes[s]) allSchemes[s] = { count: 0, amount: 0 };
+        allSchemes[s].count += c;
+        allSchemes[s].amount += c * (lookup[s] ?? 10);
+      });
+      Object.entries(data.childSchemes).forEach(([s, c]) => {
+        if (!allSchemes[s]) allSchemes[s] = { count: 0, amount: 0 };
+        allSchemes[s].count += c;
+        allSchemes[s].amount += c * (lookup[s] ?? 10);
+      });
+
+      const summaryRows = Object.entries(allSchemes).map(([scheme, val]) => ({
+        scheme,
+        count: val.count,
+        amount: val.amount
+      }));
+
+      ops.push({
+        updateOne: {
+          filter: { createdBy: data.createdBy, date: data.date, drawTime: summaryDrawTime },
+          update: {
+            $set: {
+              userId: data.userId,
+              selfCount: data.selfCount,
+              selfAmount: selfAmount,
+              childCount: data.childCount,
+              childAmount: childAmount,
+              totalCount: data.totalCount,
+              totalAmount: selfAmount + childAmount,
+              schemes: [{ rows: summaryRows }]
+            }
+          },
+          upsert: true
+        }
+      });
+    }
+
+    if (ops.length > 0) {
+      console.log(`💾 [syncSummaries] Hierarchical upserting ${ops.length} summaries...`);
+      await SalesReportSummary.bulkWrite(ops);
+    }
+
+    console.log(`✅ [syncSummaries] Sync completed successfully`);
+    res.json({
+      message: "Sync completed successfully",
+      processedEntries: entries.length,
+      summariesUpdated: ops.length
+    });
+
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Server error" });
+    console.error("❌ [syncSummaries] Error:", err);
+    res.status(500).json({ message: err.message });
   }
 };
 
 
+// ✅ Automatically update SalesReportSummary when new entries are saved
+// async function updateAutomaticSummary(username, dateStr, timeLabel, timeCode, newEntries) {
+//   try {
+//     const normUsername = normalizeName(username);
+//     const allUsers = await MainUser.find().select("username _id createdBy");
+//     const userMap = {};
+//     allUsers.forEach(u => userMap[normalizeName(u.username)] = u._id);
+
+//     const drawLabel = summaryLabelMap[timeLabel.trim()] || timeLabel.trim().toUpperCase();
+
+//     // Group newEntries by scheme
+//     const schemeCounts = {};
+//     newEntries.forEach(e => {
+//       let scheme = extractBaseType(e.type);
+//       const count = Number(e.count) || 1;
+//       schemeCounts[scheme] = (schemeCounts[scheme] || 0) + count;
+//     });
+
+//     const totalCount = Object.values(schemeCounts).reduce((a, b) => a + b, 0);
+
+//     // 1. Build the ancestral path (Seller -> Parent -> Grandparent...)
+//     const path = [];
+//     let currentName = normUsername;
+//     const visited = new Set(); // Prevent potential cycles
+
+//     while (currentName && !visited.has(currentName)) {
+//       visited.add(currentName);
+//       path.push(currentName);
+//       const user = allUsers.find(u => normalizeName(u.username) === currentName);
+//       currentName = normalizeName(user?.createdBy);
+//     }
+
+//     // 2. Process each level in the hierarchy
+//     for (const currentUser of path) {
+//       const isSeller = (currentUser === normUsername);
+//       const userId = userMap[currentUser];
+//       if (!userId) continue;
+
+//       // Calculate total amount for this specific user based on their rates
+//       const rateMaster = await RateMaster.findOne({
+//         user: { $regex: new RegExp(`^${currentUser}$`, 'i') },
+//         draw: drawLabel
+//       });
+//       const rateLookup = {};
+//       (rateMaster?.rates || []).forEach(r => {
+//         const key = (r.label || r.name || "").toUpperCase();
+//         if (key) {
+//           rateLookup[key] = Number(r.rate) || getRateForType(key);
+//         }
+//       });
+
+//       let batchAmount = 0;
+//       const schemeBatchAmounts = {};
+//       Object.entries(schemeCounts).forEach(([scheme, count]) => {
+//         const rate = rateLookup[scheme] ?? getRateForType(scheme);
+//         const amt = count * rate;
+//         batchAmount += amt;
+//         schemeBatchAmounts[scheme] = amt;
+//       });
+
+//       // 1. Ensure a summary document exists for this (user, date, draw)
+//       const summary = await SalesReportSummary.findOneAndUpdate(
+//         { createdBy: currentUser, date: dateStr, drawTime: drawLabel },
+//         {
+//           $setOnInsert: { userId: userId, schemes: [{ rows: [] }] },
+//           $inc: {
+//             totalCount: totalCount,
+//             totalAmount: batchAmount,
+//             [isSeller ? "selfCount" : "childCount"]: totalCount,
+//             [isSeller ? "selfAmount" : "childAmount"]: batchAmount
+//           }
+//         },
+//         { upsert: true, new: true }
+//       );
+
+//       // 2. Identify which schemes in this batch are already in the document
+//       const existingRows = summary.schemes?.[0]?.rows || [];
+//       const existingSchemeNames = existingRows.map(r => r.scheme);
+
+//       const rowsToUpdate = Object.keys(schemeCounts).filter(s => existingSchemeNames.includes(s));
+//       const rowsToPush = Object.keys(schemeCounts).filter(s => !existingSchemeNames.includes(s));
+
+//       // 3. Update existing rows using positional operator
+//       const levelOps = rowsToUpdate.map(scheme => {
+//         return SalesReportSummary.updateOne(
+//           { _id: summary._id, "schemes.0.rows.scheme": scheme },
+//           {
+//             $inc: {
+//               "schemes.0.rows.$.count": schemeCounts[scheme],
+//               "schemes.0.rows.$.amount": schemeBatchAmounts[scheme]
+//             }
+//           }
+//         );
+//       });
+
+//       // 4. Push new rows
+//       if (rowsToPush.length > 0) {
+//         const newRows = rowsToPush.map(s => ({
+//           scheme: s,
+//           count: schemeCounts[s],
+//           amount: schemeBatchAmounts[s]
+//         }));
+//         levelOps.push(
+//           SalesReportSummary.updateOne(
+//             { _id: summary._id },
+//             { $push: { "schemes.0.rows": { $each: newRows } } }
+//           )
+//         );
+//       }
+
+//       if (levelOps.length > 0) {
+//         await Promise.all(levelOps);
+//       }
+//     }
+
+//     console.log(`✅ [updateAutomaticSummary] Recursively updated summaries for ${username} tree (${drawLabel})`);
+//   } catch (err) {
+//     console.error("❌ [updateAutomaticSummary] Error:", err);
+//   }
+// }
+
+async function updateAutomaticSummary(username, dateStr, timeLabel, timeCode, newEntries) {
+  try {
+    const normUsername = normalizeName(username);
+    const drawKey = (timeLabel || "").trim().toUpperCase();
+    const drawLabel = summaryLabelMap[drawKey] || drawKey;
+
+    /* -------------------------------
+       1️⃣ Group entries by scheme
+    -------------------------------- */
+    const schemeCounts = {};
+    newEntries.forEach(e => {
+      const scheme = extractBaseType(e.type);
+      const count = Number(e.count) || 1;
+      schemeCounts[scheme] = (schemeCounts[scheme] || 0) + count;
+    });
+
+    const totalCount = Object.values(schemeCounts).reduce((a, b) => a + b, 0);
+
+    /* -------------------------------
+       2️⃣ Build hierarchy path (Optimized)
+    -------------------------------- */
+    const path = await getAncestors(normUsername);
+    const usersInPath = await MainUser.find({
+      username: { $in: path.map(u => new RegExp(`^${u}$`, 'i')) }
+    }).select("username _id").lean();
+
+    const userMap = {};
+    usersInPath.forEach(u => {
+      userMap[normalizeName(u.username)] = u._id;
+    });
+
+    /* -------------------------------
+       3️⃣ CALCULATE CHILD RATES ONCE
+    -------------------------------- */
+    const labelsToSearch = [drawLabel];
+    if (drawKey !== drawLabel) labelsToSearch.push(drawKey);
+    if (!labelsToSearch.includes("All")) labelsToSearch.push("All");
+
+    const childRateMaster = await RateMaster.findOne({
+      user: { $regex: new RegExp(`^${normUsername}$`, "i") },
+      draw: { $in: labelsToSearch.map(d => new RegExp(`^${d}$`, "i")) }
+    }).sort({ draw: -1 }); // Specific draw > "All"
+
+    const childRateLookup = {};
+    (childRateMaster?.rates || []).forEach(r => {
+      const key = (r.label || r.name || "").toUpperCase();
+      if (key) childRateLookup[key] = Number(r.rate);
+    });
+
+    // 🔥 CHILD RATE SOURCE (USED BY ALL LEVELS)
+    const schemeRates = {};
+    Object.keys(schemeCounts).forEach(scheme => {
+      schemeRates[scheme] =
+        childRateLookup[scheme] ?? getRateForType(scheme);
+    });
+
+    /* -------------------------------
+       4️⃣ Update each level
+    -------------------------------- */
+    for (const currentUser of path) {
+      const isSeller = currentUser === normUsername;
+      const userId = userMap[currentUser];
+      if (!userId) continue;
+
+      let batchAmount = 0;
+      const schemeBatchAmounts = {};
+
+      Object.entries(schemeCounts).forEach(([scheme, count]) => {
+        const rate = schemeRates[scheme]; // ✅ SAME RATE FOR CHILD & PARENT
+        const amt = count * rate;
+        batchAmount += amt;
+        schemeBatchAmounts[scheme] = amt;
+      });
+
+      const summary = await SalesReportSummary.findOneAndUpdate(
+        { createdBy: currentUser, date: dateStr, drawTime: drawLabel },
+        {
+          $setOnInsert: { userId, schemes: [{ rows: [] }] },
+          $inc: {
+            totalCount,
+            totalAmount: batchAmount,
+            [isSeller ? "selfCount" : "childCount"]: totalCount,
+            [isSeller ? "selfAmount" : "childAmount"]: batchAmount
+          }
+        },
+        { upsert: true, new: true }
+      );
+
+      const existingRows = summary.schemes?.[0]?.rows || [];
+      const existingSchemeNames = existingRows.map(r => r.scheme);
+
+      const rowsToUpdate = Object.keys(schemeCounts).filter(s => existingSchemeNames.includes(s));
+      const rowsToPush = Object.keys(schemeCounts).filter(s => !existingSchemeNames.includes(s));
+
+      const ops = [];
+
+      rowsToUpdate.forEach(scheme => {
+        ops.push(
+          SalesReportSummary.updateOne(
+            { _id: summary._id, "schemes.0.rows.scheme": scheme },
+            {
+              $inc: {
+                "schemes.0.rows.$.count": schemeCounts[scheme],
+                "schemes.0.rows.$.amount": schemeBatchAmounts[scheme]
+              }
+            }
+          )
+        );
+      });
+
+      if (rowsToPush.length > 0) {
+        ops.push(
+          SalesReportSummary.updateOne(
+            { _id: summary._id },
+            {
+              $push: {
+                "schemes.0.rows": {
+                  $each: rowsToPush.map(s => ({
+                    scheme: s,
+                    count: schemeCounts[s],
+                    amount: schemeBatchAmounts[s]
+                  }))
+                }
+              }
+            }
+          )
+        );
+      }
+
+      if (ops.length) await Promise.all(ops);
+    }
+
+    console.log(`✅ updateAutomaticSummary FIXED for ${username} (${drawLabel})`);
+  } catch (err) {
+    console.error("❌ updateAutomaticSummary error:", err);
+  }
+}
+
+/**
+ * Update SalesReportSummary incrementally for edits/deletes
+ */
+async function updateSummaryDelta(username, dateStr, timeLabel, scheme, countDelta, amountDelta) {
+  try {
+    const normUsername = normalizeName(username);
+    const allUsers = await MainUser.find().select("username _id createdBy");
+
+    const userMap = {};
+    allUsers.forEach(u => {
+      userMap[normalizeName(u.username)] = u._id;
+    });
+
+    const drawKey = (timeLabel || "").trim().toUpperCase();
+    const drawLabel = summaryLabelMap[drawKey] || drawKey;
+
+    // Build hierarchy path
+    const path = [];
+    let currentName = normUsername;
+    const visited = new Set();
+    while (currentName && !visited.has(currentName)) {
+      visited.add(currentName);
+      path.push(currentName);
+      const user = allUsers.find(u => normalizeName(u.username) === currentName);
+      currentName = normalizeName(user?.createdBy);
+    }
+
+    // Update each level in the hierarchy
+    for (const currentUser of path) {
+      const isSeller = currentUser === normUsername;
+      const userId = userMap[currentUser];
+      if (!userId) continue;
+
+      const summary = await SalesReportSummary.findOneAndUpdate(
+        { createdBy: currentUser, date: dateStr, drawTime: drawLabel },
+        {
+          $setOnInsert: { userId, schemes: [{ rows: [] }] },
+          $inc: {
+            totalCount: countDelta,
+            totalAmount: amountDelta,
+            [isSeller ? "selfCount" : "childCount"]: countDelta,
+            [isSeller ? "selfAmount" : "childAmount"]: amountDelta
+          }
+        },
+        { upsert: true, new: true }
+      );
+
+      // Update the specific scheme row
+      const existingRows = summary.schemes?.[0]?.rows || [];
+      const rowIndex = existingRows.findIndex(r => r.scheme === scheme);
+
+      if (rowIndex !== -1) {
+        await SalesReportSummary.updateOne(
+          { _id: summary._id, "schemes.0.rows.scheme": scheme },
+          {
+            $inc: {
+              "schemes.0.rows.$.count": countDelta,
+              "schemes.0.rows.$.amount": amountDelta
+            }
+          }
+        );
+      } else if (countDelta !== 0 || amountDelta !== 0) {
+        // If row doesn't exist and we are adding (not just subtracting to 0)
+        await SalesReportSummary.updateOne(
+          { _id: summary._id },
+          {
+            $push: {
+              "schemes.0.rows": {
+                scheme: scheme,
+                count: countDelta,
+                amount: amountDelta
+              }
+            }
+          }
+        );
+      }
+    }
+  } catch (err) {
+    console.error("❌ updateSummaryDelta error:", err);
+  }
+}
+
+const createSalesReportSummary = async (req, res) => {
+  try {
+    const { userId, createdBy, date, drawTime, schemes } = req.body;
+
+    if (!userId || !createdBy || !date || !drawTime || !schemes) {
+      return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    /* 1️⃣ CALCULATE TOTAL COUNT */
+    let totalCount = 0;
+
+    schemes.forEach(block => {
+      block.rows.forEach(row => {
+        totalCount += Number(row.count) || 0;
+      });
+    });
+
+    /* 2️⃣ SAVE SUMMARY (NO CALCULATION, NO ENTRY, NO RATE) */
+    const summary = await SalesReportSummary.create({
+      userId,
+      createdBy,
+      date,
+      drawTime,
+      totalCount,
+      totalAmount: 0, // explicitly zero
+      schemes
+    });
+
+    res.status(201).json({
+      message: "Sales summary saved",
+      data: summary
+    });
+
+  } catch (err) {
+    console.error("❌ createSalesReportSummary error:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+
+
+
+
+
+
+const getSalesReportSummary = async (req, res) => {
+  try {
+    let { fromDate, toDate, drawTime, userId, createdBy } = req.query;
+
+    // 🛡️ Security Check: Enforce hierarchical filter if not admin
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      const targetUser = createdBy || req.user.username;
+      if (!allowed.includes(targetUser)) {
+          return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      createdBy = targetUser;
+      userId = undefined; 
+    }
+
+    const filter = {};
+
+    if (userId) filter.userId = userId;
+    if (createdBy) filter.createdBy = createdBy;
+    if (drawTime && drawTime !== "ALL") {
+      filter.drawTime = drawTime.toUpperCase();
+    }
+
+    if (fromDate && toDate) {
+      filter.createdAt = {
+        $gte: new Date(`${fromDate}T00:00:00.000Z`),
+        $lte: new Date(`${toDate}T23:59:59.999Z`)
+      };
+    }
+
+    const summaries = await SalesReportSummary
+      .find(filter)
+      .sort({ createdAt: -1 });
+
+    const totalCount = summaries.reduce((s, r) => s + (r.totalCount || 0), 0);
+    const totalAmount = summaries.reduce((s, r) => s + (r.totalAmount || 0), 0);
+
+    res.json({
+      count: totalCount,
+      amount: totalAmount,
+      records: summaries.length,
+      data: summaries
+    });
+
+  } catch (err) {
+    console.error("❌ getSalesReportSummary error:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+const updateSalesReportSummary = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { schemeId, rowId, count, userType } = req.body;
+
+    const newCount = Number(count);
+    if (!Number.isFinite(newCount) || newCount < 0) {
+      return res.status(400).json({ message: "Invalid count" });
+    }
+
+    /* 1️⃣ FIND SUMMARY */
+    const summary = await SalesReportSummary.findById(id);
+    if (!summary) {
+      return res.status(404).json({ message: "Sales report summary not found" });
+    }
+
+    /* 2️⃣ BLOCK TIME CHECK (same as before) */
+    const blockTimeData = await getBlockTimeF(summary.drawTime, userType);
+    if (!blockTimeData?.blockTime) {
+      return res.status(400).json({ message: "Block time not found" });
+    }
+
+    const [bh, bm] = blockTimeData.blockTime.split(":").map(Number);
+    const d = new Date(summary.date);
+    const blockTime = new Date(d.getFullYear(), d.getMonth(), d.getDate(), bh, bm);
+
+    if (new Date() >= blockTime) {
+      return res.status(400).json({
+        message: "Cannot update count, entry time is blocked for this draw"
+      });
+    }
+
+    /* 3️⃣ FIND ROW + CALCULATE DIFF (KEY PART 🔥) */
+    let oldCount = null;
+
+    for (const scheme of summary.schemes) {
+      if (scheme._id.toString() === schemeId) {
+        for (const row of scheme.rows) {
+          if (row._id.toString() === rowId) {
+            oldCount = Number(row.count) || 0;
+            row.count = newCount; // set new value
+            break;
+          }
+        }
+      }
+    }
+
+    if (oldCount === null) {
+      return res.status(404).json({ message: "Row not found" });
+    }
+
+    /* 4️⃣ DIFFERENCE LOGIC (EXACT updateEntries behavior) */
+    const diff = newCount - oldCount;
+
+    summary.totalCount = (Number(summary.totalCount) || 0) + diff;
+
+    /* 5️⃣ SAVE */
+    await summary.save();
+
+    res.status(200).json({
+      message: "Sales report summary updated using updateEntries logic",
+      diff,
+      oldCount,
+      newCount,
+      totalCount: summary.totalCount
+    });
+
+  } catch (err) {
+    console.error("❌ UPDATE SALES REPORT SUMMARY ERROR:", err);
+    res.status(500).json({ message: "Server error updating sales report summary" });
+  }
+};
+
+const saveWinningReport = async (req, res) => {
+  try {
+    const { date, timeLabel, agent } = req.body;
+
+    if (!date || !timeLabel || !agent) {
+      return res.status(400).json({
+        message: "date, timeLabel and agent are required"
+      });
+    }
+
+    const summary = await saveWinningSummaryInternal({ date, timeLabel, agent });
+
+    return res.json({
+      message: "Winning report summary saved successfully",
+      summary
+    });
+
+  } catch (err) {
+    console.error("❌ saveWinningReport ERROR:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Helper for dynamic super calculation in summary
+const getSuperPrizeForWinType = (winType, drawSchemeData, fallbackSuper = 0) => {
+  if (!drawSchemeData || !winType) return fallbackSuper;
+
+  let targetGroup = "";
+  let baseType = "";
+
+  if (winType.startsWith("SUPER")) {
+    targetGroup = "Group 3-SUPER";
+    baseType = "SUPER";
+  } else if (winType.startsWith("BOX")) {
+    targetGroup = "Group 3-BOX";
+    baseType = "BOX";
+  } else if (["AB", "BC", "AC"].includes(winType)) {
+    targetGroup = "Group 2";
+    baseType = winType;
+  } else if (["A", "B", "C"].includes(winType)) {
+    targetGroup = "Group 1";
+    baseType = winType;
+  }
+
+  const group = (drawSchemeData.schemes || []).find(g => g.group === targetGroup);
+  if (!group) return fallbackSuper;
+
+  let row;
+  if (baseType === "SUPER" || baseType === "BOX") {
+    const match = winType.match(/(\d+)/);
+    const pos = match ? parseInt(match[1], 10) : (winType.includes("other") || winType.includes("permutation") ? 6 : 1);
+    row = group.rows.find(r => r.pos === pos);
+    if (!row && baseType === "BOX" && pos <= 1) row = group.rows[0];
+  } else {
+    row = group.rows.find(r => r.scheme === baseType);
+  }
+
+  // 🔑 THE FIX: If row or super is missing in THIS scheme, use the fallback from the agent's record
+  const val = row ? row.super : null;
+  return (val !== null && val !== undefined) ? val : fallbackSuper;
+};
+
+const getWinningReportSummary = async (req, res) => {
+  try {
+    let { fromDate, toDate, time = "ALL", agent, loggedInUser } = req.body;
+
+    // 🛡️ Security Check: Enforce hierarchical filter if not admin
+    if (req.user.userType !== 'admin') {
+      const descendants = await getAllDescendantsFlat(req.user.username);
+      const allowed = [req.user.username, ...descendants];
+      const targetUser = agent || loggedInUser || req.user.username;
+      if (!allowed.includes(targetUser)) {
+          return res.status(403).json({ message: 'Access denied: You can only view your own descendants' });
+      }
+      agent = targetUser;
+      loggedInUser = req.user.username;
+    }
+
+    if (!fromDate || !toDate) {
+      return res.status(400).json({ message: "fromDate and toDate are required" });
+    }
+
+    // 1. Determine the target agent for the current view
+    // If agent is explicitly provided, we look at that agent's branch.
+    // Otherwise, we look at the loggedInUser's branch.
+    const targetAgent = agent && agent !== "ALL" ? agent : loggedInUser;
+
+    if (!targetAgent) {
+      return res.status(400).json({ message: `target agent is required (agent: ${agent}, loggedInUser: ${loggedInUser})` });
+    }
+
+    // 2. Fetch all related summaries in the date/time range
+    // We want summaries where the agent is the targetAgent OR targetAgent is in their path
+    const query = {
+      date: { $gte: fromDate, $lte: toDate },
+      $or: [
+        { agent: targetAgent },
+        { createdByPath: targetAgent }
+      ]
+    };
+
+    if (time !== "ALL") {
+      const searchLabels = getSearchLabels(time);
+      query.timeLabel = { $in: searchLabels };
+    }
+
+    const allSummaries = await WinningSummary.find(query).lean();
+
+    // 3. Fetch user hierarchy and viewer scheme info
+    const allUsers = await MainUser.find().select("username createdBy usertype scheme").lean();
+    const targetLower = targetAgent.toLowerCase();
+    const children = allUsers.filter(u => (u.createdBy || '').toLowerCase() === targetLower);
+    const childUsernames = children.map(u => u.username);
+    const childUsernamesLower = childUsernames.map(u => u.toLowerCase());
+
+    // 2.5 Fetch viewer's scheme to scale SUPER prizes
+    const viewerName = loggedInUser || targetAgent;
+    const viewer = allUsers.find(u => u.username === viewerName);
+    const viewerSchemeOrig = viewer?.scheme || "N/A";
+    let viewerActiveTab = 1;
+    if (viewerSchemeOrig.toUpperCase() !== "N/A") {
+      viewerActiveTab = parseInt(viewerSchemeOrig.replace(/[^0-9]/g, ""), 10) || 1;
+    }
+
+    const uniqueLabels = [...new Set(allSummaries.map(s => s.timeLabel))];
+    const viewerSchemeCache = {};
+    for (const label of uniqueLabels) {
+      const normalizedLabel = summaryLabelMap[label.toUpperCase()] || label;
+      const searchLabels = getSearchLabels(normalizedLabel);
+      const schemaDoc = await Schema.findOne(
+        { activeTab: viewerActiveTab, "draws.drawName": { $in: searchLabels } },
+        { draws: { $elemMatch: { drawName: { $in: searchLabels } } } }
+      ).lean();
+      if (schemaDoc) viewerSchemeCache[label] = schemaDoc.draws[0];
+    }
+
+    // 4. Aggregate Totals
+    let totalBills = 0;
+    let totalBillAmount = 0;
+    let totalWinningAmount = 0;
+    let superTotalAmount = 0;
+
+    const byAgentMap = {};
+
+    // Initialize map for self and direct children
+    byAgentMap[targetAgent] = { agent: targetAgent, totalBills: 0, totalBillAmount: 0, totalWinningAmount: 0, superTotalAmount: 0, isSelf: true };
+    children.forEach(c => {
+      byAgentMap[c.username] = { agent: c.username, totalBills: 0, totalBillAmount: 0, totalWinningAmount: 0, superTotalAmount: 0, usertype: c.usertype };
+    });
+
+    for (const s of allSummaries) {
+      // Logic: Dynamically calculate Super based on Viewer's scheme
+      const drawScheme = viewerSchemeCache[s.timeLabel];
+      let calculatedSuperSum = 0;
+      const winCounts = s.winCounts || {};
+
+      for (const winType in winCounts) {
+        const count = winCounts[winType] || 0;
+        // Pass the summary's own prize as fallback in case viewer's scheme is broken
+        const fallbackSuper = s.winPrizes ? (s.winPrizes[winType] || 0) : 0;
+        const superPrize = getSuperPrizeForWinType(winType, drawScheme, fallbackSuper);
+        calculatedSuperSum += (superPrize * count);
+      }
+
+      const effectiveSuperTotal = (s.totalWinningAmount || 0) + calculatedSuperSum;
+
+      // 1. Global totals (Sum of ALL direct summaries in the target's branch)
+      totalBills += s.totalBills || 0;
+      totalBillAmount += s.totalBillAmount || 0;
+      totalWinningAmount += s.totalWinningAmount || 0;
+      superTotalAmount += effectiveSuperTotal;
+
+      // 2. Breakdown Logic
+      if (s.agent === targetAgent) {
+        // Direct winnings contribution for the target agent
+        byAgentMap[targetAgent].totalBills += s.totalBills || 0;
+        byAgentMap[targetAgent].totalBillAmount += s.totalBillAmount || 0;
+        byAgentMap[targetAgent].totalWinningAmount += s.totalWinningAmount || 0;
+        byAgentMap[targetAgent].superTotalAmount += effectiveSuperTotal;
+      } else {
+        // Find which direct child's branch this summary belongs to
+        const path = s.createdByPath || [];
+        const targetIndex = path.findIndex(p => p.toLowerCase() === targetLower);
+
+        // The child is either the summary's agent itself (if direct child)
+        // or an intermediate child in the path.
+        let childKey = null;
+        if (targetIndex !== -1 && path[targetIndex + 1]) {
+          childKey = path[targetIndex + 1];
+        } else if (childUsernamesLower.includes(s.agent.toLowerCase())) {
+          childKey = s.agent;
+        }
+
+        if (childKey && byAgentMap[childKey]) {
+          byAgentMap[childKey].totalBills += s.totalBills || 0;
+          byAgentMap[childKey].totalBillAmount += s.totalBillAmount || 0;
+          byAgentMap[childKey].totalWinningAmount += s.totalWinningAmount || 0;
+          byAgentMap[childKey].superTotalAmount += effectiveSuperTotal;
+        }
+      }
+    }
+
+    return res.json({
+      fromDate,
+      toDate,
+      time,
+      agent: targetAgent,
+      totalBills,
+      totalBillAmount,
+      totalWinningAmount,
+      superTotalAmount,
+      byAgent: Object.values(byAgentMap).filter(a => a.totalWinningAmount > 0 || a.totalBills > 0)
+    });
+
+  } catch (err) {
+    console.error("❌ getWinningReportSummary ERROR:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+
+
+
+
+
+
+
+const deleteUserAmount = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await UserAmount.findByIdAndDelete(id);
+    res.status(200).json({ message: "Limit deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
 
 module.exports = {
   createUser,
@@ -3422,8 +6762,19 @@ module.exports = {
   getOverflowLimit,
   saveOverflowLimit,
   getOverflowLimitByDrawTime,
-  addDrawScheme,
-  updateSuperOnly,
-  addDrawScheme,
-  getDrawByTime
+  getDrawByTabAndName,
+  addDrawToTab,
+  updateSuperForDraw,
+  addUserAmount,
+  getUserAmounts,
+  updateAmountOnly,
+  deleteUserAmount,
+  createSalesReportSummary,
+  getSalesReportSummary,
+  updateSalesReportSummary,
+  syncSummaries,
+  saveWinningReport,
+  getWinningReportSummary,
+  isUserOrAncestorSalesBlocked,
+  getAncestors
 };

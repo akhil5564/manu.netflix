@@ -1,74 +1,133 @@
 const express = require('express');
 const dotenv = require('dotenv');
 dotenv.config();
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
 const connectDB = require('./database/model/ConnectToDb');
 const Controller = require('./controller/Controller');
 
+const MainUser = require('./model/MainUser');
+const Entry = require('./model/Entry');
+const RateMaster = require('./model/RateMaster');
+const { authMiddleware, adminMiddleware } = require('./middleware/authMiddleware');
+
+
 const app = express();
 connectDB();
+
+async function ensureIndexes() {
+  try {
+    await Entry.syncIndexes();
+    await MainUser.syncIndexes();
+    await RateMaster.syncIndexes();
+    console.log("✅ MongoDB indexes ensured");
+  } catch (err) {
+    console.error("❌ Index creation failed:", err);
+  }
+}
+
 app.use(express.json());
+app.use(helmet());
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5000, // limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again after 15 minutes'
+});
+
+// Apply limiter to all routes
+app.use(limiter);
+
+// Specific limiter for login to prevent brute force
+const loginLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10, // limit each IP to 10 login attempts per hour
+  message: 'Too many login attempts from this IP, please try again after an hour'
+});
+app.post('/login', loginLimiter, Controller.loginUser);
 
 
 
 
 // Routes
-app.get("/get-blocked-dates", Controller.getBlockedDates);
-app.post("/add-blockdate", Controller.addBlockDate);
-app.delete("/delete-blockdate/:id", Controller.deleteBlockDate);
+app.get("/get-blocked-dates", authMiddleware, Controller.getBlockedDates);
+app.post("/add-blockdate", authMiddleware, adminMiddleware, Controller.addBlockDate);
+app.delete("/delete-blockdate/:id", authMiddleware, adminMiddleware, Controller.deleteBlockDate);
 
+app.get('/users', authMiddleware, Controller.getAllUsers);
+app.post('/getusersByid', authMiddleware, Controller.getusersByid);
+app.post('/newuser', authMiddleware, adminMiddleware, Controller.createUser);
+app.post('/addEntries', authMiddleware, Controller.addEntries);
+app.post('/ticket-limit', authMiddleware, adminMiddleware, Controller.saveTicketLimit);
+app.post('/ratemaster', authMiddleware, adminMiddleware, Controller.saveRateMaster);
+app.post('/addResult', authMiddleware, adminMiddleware, Controller.saveResult);
+app.get('/getResult', authMiddleware, Controller.getResult);
+app.get('/entries', authMiddleware, Controller.getEntries);
+app.get('/get-entries-with-timeblock', authMiddleware, Controller.getEntriesWithTimeBlock);
+app.get('/next-bill', authMiddleware, Controller.getNextBillNumber);
+app.patch('/invalidateEntry/:id', authMiddleware, Controller.invalidateEntry);
+app.delete('/deleteEntryById/:id/:userType', authMiddleware, Controller.deleteEntryById);
+app.delete('/deleteEntriesByBillNo/:billNo', authMiddleware, Controller.deleteEntriesByBillNo);
+app.put('/updateEntryCount/:id', authMiddleware, Controller.updateEntryCount);
+app.get('/report/count', authMiddleware, Controller.getCountReport);
+app.get('/ratemaster', authMiddleware, Controller.getRateMaster);
+app.get('/rateMaster', authMiddleware, Controller.getRateMaster);
 
-app.get('/users', Controller.getAllUsers);
-app.post('/getusersByid', Controller.getusersByid);
-app.post('/newuser', Controller.createUser);
-app.post('/addEntries', Controller.addEntries);
-app.post('/ticket-limit', Controller.saveTicketLimit);
-app.post('/ratemaster', Controller.saveRateMaster);
-app.post('/addResult', Controller.saveResult);
-app.get('/getResult', Controller.getResult);
-app.get('/entries', Controller.getEntries);
-app.get('/get-entries-with-timeblock', Controller.getEntriesWithTimeBlock);
-app.post('/login', Controller.loginUser);
-app.get('/next-bill', Controller.getNextBillNumber);
-app.patch('/invalidateEntry/:id', Controller.invalidateEntry);
-app.delete('/deleteEntryById/:id/:userType', Controller.deleteEntryById);
-app.delete('/deleteEntriesByBillNo/:billNo', Controller.deleteEntriesByBillNo);
-app.put('/updateEntryCount/:id', Controller.updateEntryCount);
-app.get('/report/count', Controller.getCountReport);
-app.get('/rateMaster', Controller.getRateMaster);
-app.post('/setBlockTime', Controller.setBlockTime);
-app.get('/getBlockTime/:drawLabel', Controller.getBlockTime);
-app.get('/blockTime/:drawLabel/:type', Controller.getBlockTimeByType);
-app.get('/blockTimes', Controller.getAllBlockTimes);
-app.post('/countByNumber', Controller.countByNumber);
-app.get('/getticketLimit', Controller.getLatestTicketLimit);
-app.patch("/user/blockLogin/:id", Controller.toggleLoginBlock);
-app.patch('/blockSales/:id', Controller.toggleSalesBlock);
-app.put('/users/:username', Controller.updatePasswordController);
-app.put('/users/update/:id', Controller.updateUser);
-app.delete('/users/:id', Controller.deleteUser);
-app.post('/report/netpay-multiday', Controller.netPayMultiday);
-app.post('/report/winningReport', Controller.getWinningReport);
-app.get('/report/salesReport', Controller.getSalesReport);
-app.post('/entries/saveValidated', Controller.saveValidEntries);
+app.post('/setBlockTime', authMiddleware, adminMiddleware, Controller.setBlockTime);
+app.get('/getBlockTime/:drawLabel', authMiddleware, Controller.getBlockTime);
+app.get('/blockTime/:drawLabel/:type', authMiddleware, Controller.getBlockTimeByType);
+app.get('/blockTimes', authMiddleware, adminMiddleware, Controller.getAllBlockTimes);
+app.post('/countByNumber', authMiddleware, Controller.countByNumber);
+app.get('/getticketLimit', authMiddleware, Controller.getLatestTicketLimit);
+app.patch("/user/blockLogin/:id", authMiddleware, adminMiddleware, Controller.toggleLoginBlock);
+app.patch('/blockSales/:id', authMiddleware, adminMiddleware, Controller.toggleSalesBlock);
+app.put('/users/:username', authMiddleware, Controller.updatePasswordController);
+app.put('/users/update/:id', authMiddleware, Controller.updateUser);
+app.delete('/users/:id', authMiddleware, adminMiddleware, Controller.deleteUser);
+app.post('/report/netpay-multiday', authMiddleware, Controller.netPayMultiday);
+app.post('/report/winningReport', authMiddleware, Controller.getWinningReport);
+app.get('/report/salesReport', authMiddleware, Controller.getSalesReport);
+app.post('/entries/saveValidated', authMiddleware, Controller.saveValidEntries);
 
 // Block Number Routes
-app.get('/block-numbers', Controller.getBlockedNumbers);
-app.post('/block-numbers', Controller.addBlockedNumbers);
-app.put('/block-numbers/:id', Controller.updateBlockedNumber);
-app.delete('/block-numbers/:id', Controller.deleteBlockedNumber);
-app.get('/block-numbers/:createdBy/:drawTime', Controller.getBlockedNumbersByUser);
-app.delete('/block-numbers/bulk', Controller.bulkDeleteBlockedNumbers);
+app.get('/block-numbers', authMiddleware, Controller.getBlockedNumbers);
+app.post('/block-numbers', authMiddleware, adminMiddleware, Controller.addBlockedNumbers);
+app.put('/block-numbers/:id', authMiddleware, adminMiddleware, Controller.updateBlockedNumber);
+app.delete('/block-numbers/:id', authMiddleware, adminMiddleware, Controller.deleteBlockedNumber);
+app.get('/block-numbers/:createdBy/:drawTime', authMiddleware, Controller.getBlockedNumbersByUser);
+app.delete('/block-numbers/bulk', authMiddleware, adminMiddleware, Controller.bulkDeleteBlockedNumbers);
 
-app.get('/overflow-limit', Controller.getOverflowLimit);
-app.post('/overflow-limit', Controller.saveOverflowLimit);
-app.get('/overflow-limit/by-drawtime', Controller.getOverflowLimitByDrawTime);
+app.get('/overflow-limit', authMiddleware, Controller.getOverflowLimit);
+app.post('/overflow-limit', authMiddleware, adminMiddleware, Controller.saveOverflowLimit);
+app.get('/overflow-limit/by-drawtime', authMiddleware, Controller.getOverflowLimitByDrawTime);
 // ADD new draw scheme (admin)
-app.post("/draw-scheme", Controller.addDrawScheme);
+app.post("/draw-scheme", authMiddleware, adminMiddleware, Controller.addDrawToTab);
 // GET draw scheme by time
-app.get('/draw-scheme', Controller.getDrawByTime);
+app.get('/draw-scheme', authMiddleware, Controller.getDrawByTabAndName);
 // UPDATE super value only
-app.patch("/draw-scheme/super", Controller.updateSuperOnly);
+app.put("/draw-scheme/super", authMiddleware, adminMiddleware, Controller.updateSuperForDraw);
+app.post('/add-amount', authMiddleware, adminMiddleware, Controller.addUserAmount);
+app.get('/get-amount', authMiddleware, Controller.getUserAmounts);
+app.patch('/user-amount/:id/amount', authMiddleware, adminMiddleware, Controller.updateAmountOnly);
+app.delete('/user-amount/:id', authMiddleware, adminMiddleware, Controller.deleteUserAmount);
+
+app.post('/sales-report-summary', authMiddleware, adminMiddleware, Controller.createSalesReportSummary);
+app.get('/sales-report-summary', authMiddleware, Controller.getSalesReportSummary);
+app.put('/sales-report-summary/:id', authMiddleware, adminMiddleware, Controller.updateSalesReportSummary);
+
+app.post('/report/sync-summaries', authMiddleware, adminMiddleware, Controller.syncSummaries);
+
+app.get("/debug/rateMasters", authMiddleware, adminMiddleware, async (req, res) => {
+  const rates = await RateMaster.find({});
+  res.json(rates);
+});
+
+// 🔹 SAVE / UPDATE winning summary (called internally after result save)
+app.post("/winning/summary/save", authMiddleware, adminMiddleware, Controller.saveWinningReport);
+
+// 🔹 GET winning summary (frontend uses this)
+app.post("/winning/summary", authMiddleware, Controller.getWinningReportSummary);
 
 
 

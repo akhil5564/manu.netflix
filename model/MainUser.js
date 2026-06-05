@@ -2,16 +2,24 @@ const mongoose = require('mongoose');
 
 const mainUserSchema = new mongoose.Schema({
   name: String,
-  username: { type: String, unique: true },
+  username: { type: String, unique: true }, // index already created
   password: String,
   scheme: String,
   createdBy: String,
-    usertype: {
+  usertype: {
     type: String,
-    enum: ['master', 'sub'], // restrict to two roles
+    enum: ['master', 'sub', 'admin'],
     default: 'sub',
   },
   createdAt: { type: Date, default: Date.now },
+  blocked: { type: Boolean, default: false },
+  salesBlocked: { type: Boolean, default: false },
 });
 
-module.exports = mongoose.model('MainUser', mainUserSchema);
+/* 🔥 PERFORMANCE INDEXES */
+mainUserSchema.index({ createdBy: 1 });
+mainUserSchema.index({ usertype: 1 });
+
+module.exports =
+  mongoose.models.MainUser ||
+  mongoose.model('MainUser', mainUserSchema);
